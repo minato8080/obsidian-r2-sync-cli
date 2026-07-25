@@ -1,0 +1,95 @@
+# セットアップ手順
+
+## 1. 依存パッケージのインストール
+
+```powershell
+cd C:\path\to\r2-sync
+npm install
+```
+
+## 2. `.env` の作成
+
+```powershell
+copy .env.example .env
+```
+
+`.env` を開いて以下を埋める。
+
+| 変数 | 説明 |
+|---|---|
+| `VAULT_PATH` | 同期するvaultの絶対パス（例: `C:\Users\you\Documents\MyVault`） |
+| `R2_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` 形式 |
+| `R2_BUCKET` | Remotely Save側の設定と同じバケット名 |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2のAPIトークン |
+| `R2_REMOTE_PREFIX` | Remotely Save側で「Remote Prefix」を設定していればそれと同じ値。未設定なら空でよい |
+| `SYNC_PASSWORD` | Obsidianの Remotely Save 設定画面にある暗号化パスワード（encryption method が `rclone-base64` であることを確認） |
+
+Remotely Saveの設定値はObsidianの `設定 → Remotely Save` から確認できる（`.obsidian/plugins/remotely-save/data.json` は暗号化されていて直接は読めない）。
+
+## 3. 動作確認（暗号化・同期ロジックの自己テスト、R2に接続しない）
+
+```powershell
+npm test
+```
+
+全件 `OK` になることを確認する。
+
+## 4. 実行結果に出てくる用語
+
+`npm run sync` を実行すると、ファイルごとに以下のいずれかの種別で計画・結果が表示される。
+
+| 種別 | 意味 |
+|---|---|
+| `PUSH` | ローカル→リモートへアップロード |
+| `PULL` | リモート→ローカルへダウンロード |
+| `NOOP` | 前回と変化なし。何もしない |
+| `SEED` | 状態ファイルが空の初回実行時、ローカル・リモート両方に既に存在し**内容が一致**したファイル。転送はせず「同期済み」として状態記録だけする（既にRemotely Saveで運用中のバケットに初めて向けた場合に大量に出るのが正常） |
+| `FORGET` | 前回は存在したが、今はローカル・リモート両方から消えている。状態から記録を消すだけ |
+| `DELETE_REMOTE` / `DELETE_LOCAL` | リモート/ローカルからの削除。`--allow-delete` が無いと実行されない |
+| `SKIPPED_DELETE_REMOTE` / `SKIPPED_DELETE_LOCAL` | 削除が計画されたが `--allow-delete` が無いためスキップ（警告のみ、次回また同じ計画が出る） |
+
+`PUSH`/`PULL`には`reason`が付くことがある（例:「両側変更・ローカルの方が新しいため上書き」「リモート削除だがローカルは編集済み: 編集を優先」）。両側変更時の判定方法は`DESIGN.md`の「同期アルゴリズム」参照。
+
+`SEED`ばかりでなく大量の`PUSH`/`PULL`が「不一致による上書き」reason付きで出る場合は `SYNC_PASSWORD` や `R2_REMOTE_PREFIX` の設定が間違っている可能性が高い（暗号化キーが合わずファイル名/内容が正しく復号できていない）。**この場合は `--apply` を実行しないこと。**
+
+## 5. 初回実行は必ずdry-runから
+
+```powershell
+npm run sync
+```
+
+- 実際には何も変更されない。上記の種別ごとに計画件数とパス一覧が表示されるだけ。
+- `Obsidianを開いて手動でRemotely Save同期を1回走らせてから`実行すると、ローカルとリモートの状態が揃っているのでdry-runの結果を検証しやすい。
+
+## 6. 問題なければ適用（削除を伴わない範囲）
+
+```powershell
+npm run sync:apply
+```
+
+DELETE系のアクションは既定では実行されず、警告ログのみ出る。
+
+## 7. 削除も含めて完全に適用
+
+数回 `sync:apply` を実行して挙動に問題がないことを確認してから:
+
+```powershell
+npm run sync:full
+```
+
+## 8. (任意) node_modules無しで動く単体バンドルを作る
+
+Discord bot連携など、`npm install` 済みの `node_modules` を気にせず1ファイルだけ配置して動かしたい場合:
+
+```powershell
+npm run build
+node dist/r2-sync.bundle.cjs               # dry-run
+node dist/r2-sync.bundle.cjs --apply
+```
+
+`.env` はプロジェクト直下（実行時のカレントディレクトリ）から読まれるので、`dist/r2-sync.bundle.cjs` をプロジェクト外に持ち出す場合は `.env` と `.sync-state.json` も同じディレクトリに置くこと。詳細は `DESIGN.md` の「単体実行用バンドル」参照。
+
+## 実行のたびに確認すること
+
+- 両側で変更されたファイルはコンフリクトコピーを作らず、mtimeが新しい方でそのまま上書きする（`reason`にその旨が出る）。上書きされた側の内容を戻したい場合はgit履歴から復元する。
+- 既定で除外されるのは `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` のみ。秘匿フォルダやこのツール自身の配置先など、除外したいパスは自分で `.env` の `IGNORE_EXTRA` に指定すること（`.env.example` に実例あり、`DESIGN.md`の「除外ルール」も参照）。指定を忘れると同期される。
