@@ -70,6 +70,9 @@ async function main() {
     r2Prefix: config.r2.prefix,
     apply,
     allowDelete,
+    onCheckpoint: async (newEntriesSoFar) => {
+      await saveState(config.stateFilePath, { ...prevEntries, ...newEntriesSoFar });
+    },
   });
 
   await saveState(config.stateFilePath, newEntries);

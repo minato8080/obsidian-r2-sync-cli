@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { runPool, DEFAULT_CONCURRENCY } from "./concurrency.js";
 
 function parseRemoteMtimeMs(metadata) {
   const raw = metadata.mtime ?? metadata.mMTime ?? metadata.MTime;
@@ -76,62 +77,66 @@ export async function planSync({ vaultPath, localFiles, remoteItems, prevEntries
   }
 
   if (bootstrapCandidates.length > 0) {
-    console.log(`初回比較: ローカル/リモート両方に存在する${bootstrapCandidates.length}件の内容を確認しています(並列8件)...`);
+    console.log(`初回比較: ローカル/リモート両方に存在する${bootstrapCandidates.length}件の内容を確認しています(並列${DEFAULT_CONCURRENCY}件)...`);
     let done = 0;
-    async function worker(queue) {
-      while (queue.length > 0) {
-        const { relPath, rem } = queue.shift();
-        const localBytes = await fs.readFile(path.join(vaultPath, ...relPath.split("/")));
-        const { bytes: remoteBytes, metadata } = await r2.getObject(rem.key);
-        const decrypted = await cipher.decryptContent(remoteBytes);
-        if (Buffer.from(decrypted).equals(Buffer.from(localBytes))) {
-          actions.push({ type: "SEED", relPath, remoteEtag: rem.etag });
-        } else {
-          const localMtimeMs = localFiles.get(relPath).mtimeMs;
-          const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
-          actions.push(
-            localMtimeMs > remoteMtimeMs
-              ? { type: "PUSH", relPath, reason: "初回比較: 内容不一致・ローカルの方が新しいため上書き" }
-              : { type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag, reason: "初回比較: 内容不一致・リモートの方が新しいため上書き" }
-          );
-        }
-        done++;
-        if (done % 50 === 0 || done === bootstrapCandidates.length) {
-          console.log(`  ${done}/${bootstrapCandidates.length}`);
-        }
+    await runPool(bootstrapCandidates, DEFAULT_CONCURRENCY, async ({ relPath, rem }) => {
+      const localBytes = await fs.readFile(path.join(vaultPath, ...relPath.split("/")));
+      const { bytes: remoteBytes, metadata } = await r2.getObject(rem.key);
+      const decrypted = await cipher.decryptContent(remoteBytes);
+      if (Buffer.from(decrypted).equals(Buffer.from(localBytes))) {
+        actions.push({ type: "SEED", relPath, remoteEtag: rem.etag });
+      } else {
+        const localMtimeMs = localFiles.get(relPath).mtimeMs;
+        const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
+        actions.push(
+          localMtimeMs > remoteMtimeMs
+            ? { type: "PUSH", relPath, reason: "初回比較: 内容不一致・ローカルの方が新しいため上書き" }
+            : { type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag, reason: "初回比較: 内容不一致・リモートの方が新しいため上書き" }
+        );
       }
-    }
-    const queue = [...bootstrapCandidates];
-    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, () => worker(queue)));
+      done++;
+      if (done % 50 === 0 || done === bootstrapCandidates.length) {
+        console.log(`  ${done}/${bootstrapCandidates.length}`);
+      }
+    });
   }
 
   if (conflictCandidates.length > 0) {
-    async function worker(queue) {
-      while (queue.length > 0) {
-        const { relPath, loc, rem } = queue.shift();
-        const { metadata } = await r2.headObject(rem.key);
-        const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
-        actions.push(
-          loc.mtimeMs > remoteMtimeMs
-            ? { type: "PUSH", relPath, reason: "両側変更・ローカルの方が新しいため上書き" }
-            : { type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag, reason: "両側変更・リモートの方が新しいため上書き" }
-        );
-      }
-    }
-    const queue = [...conflictCandidates];
-    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, () => worker(queue)));
+    await runPool(conflictCandidates, DEFAULT_CONCURRENCY, async ({ relPath, loc, rem }) => {
+      const { metadata } = await r2.headObject(rem.key);
+      const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
+      actions.push(
+        loc.mtimeMs > remoteMtimeMs
+          ? { type: "PUSH", relPath, reason: "両側変更・ローカルの方が新しいため上書き" }
+          : { type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag, reason: "両側変更・リモートの方が新しいため上書き" }
+      );
+    });
   }
 
   return actions;
 }
 
-export async function applyActions({ actions, vaultPath, localFiles, prevEntries, cipher, r2, r2Prefix, apply, allowDelete }) {
+export async function applyActions({ actions, vaultPath, localFiles, prevEntries, cipher, r2, r2Prefix, apply, allowDelete, onCheckpoint }) {
   const newEntries = {};
   const summary = {};
   const errors = [];
   const bump = (type) => { summary[type] = (summary[type] ?? 0) + 1; };
 
-  for (const action of actions) {
+  let done = 0;
+  let checkpointing = false;
+  async function maybeCheckpoint() {
+    if (!onCheckpoint) return;
+    if (done % 50 !== 0) return;
+    if (checkpointing) return; // 保存中に他workerが次の閾値に達しても二重書き込みしない
+    checkpointing = true;
+    try {
+      await onCheckpoint(newEntries);
+    } finally {
+      checkpointing = false;
+    }
+  }
+
+  async function processOne(action) {
     const { type, relPath } = action;
     const absPath = path.join(vaultPath, ...relPath.split("/"));
 
@@ -207,7 +212,18 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
       errors.push({ relPath, message: err.message });
       if (prevEntries[relPath]) newEntries[relPath] = prevEntries[relPath];
     }
+
+    done++;
+    if (done % 50 === 0 || done === actions.length) {
+      console.log(`  適用中: ${done}/${actions.length}`);
+    }
+    await maybeCheckpoint();
   }
+
+  if (actions.length > 0) {
+    console.log(`変更を適用しています(並列${DEFAULT_CONCURRENCY}件)...`);
+  }
+  await runPool(actions, DEFAULT_CONCURRENCY, processOne);
 
   return { newEntries, summary, errors };
 }
