@@ -173,6 +173,30 @@ check("boot: same.mdはSEED", bootActions.some((a) => a.type === "SEED" && a.rel
 check("boot: diff.mdはリモートの方が新しいのでPULL", bootActions.some((a) => a.type === "PULL" && a.relPath === "diff.md"));
 await fs.rm(bootVault, { recursive: true, force: true });
 
+// 10. 本家プラグイン等の別クライアントが「中身は同じだがtouchしただけ」を再現し、
+//     誤検知でPUSH/PULLしないことを検証する。
+
+// 10a. リモート側だけtouch(別クライアントが同一内容を再アップロード=ETagだけ変わる)
+//      -> PULLではなくSEED(転送スキップ)になるはず
+const untouchedRel = "note1.md";
+const untouchedKey = await cipher.encryptPath(untouchedRel);
+const sameContentReencrypted = await cipher.encryptContent(new TextEncoder().encode("local edit version 2"));
+remoteStore.set(untouchedKey, { bytes: sameContentReencrypted, metadata: { mtime: String(Date.now() / 1000) }, etag: `"etag-retouch-1"` });
+let r9 = await runSync();
+check("run9: リモートtouchのみ(内容同一)はSEED", r9.actions.some((a) => a.type === "SEED" && a.relPath === untouchedRel));
+check("run9: PULLは発生しない", !r9.actions.some((a) => a.type === "PULL" && a.relPath === untouchedRel));
+
+// 10b. ローカル側だけtouch(内容は同じだがmtimeだけ更新=本家プラグインがPULLした想定)
+//      -> PUSHではなくSEED(転送スキップ)になるはず
+await new Promise((r) => setTimeout(r, 20));
+const note1Path = path.join(vaultPath, untouchedRel);
+const etagBeforeTouch = remoteStore.get(untouchedKey).etag;
+await fs.utimes(note1Path, new Date(), new Date()); // 内容は変えずmtimeだけ更新
+let r10 = await runSync();
+check("run10: ローカルtouchのみ(内容同一)はSEED", r10.actions.some((a) => a.type === "SEED" && a.relPath === untouchedRel));
+check("run10: PUSHは発生しない", !r10.actions.some((a) => a.type === "PUSH" && a.relPath === untouchedRel));
+check("run10: リモートは再アップロードされていない(etag不変)", remoteStore.get(untouchedKey).etag === etagBeforeTouch);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 await fs.rm(vaultPath, { recursive: true, force: true });
 process.exitCode = fail > 0 ? 1 : 0;

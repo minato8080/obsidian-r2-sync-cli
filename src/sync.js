@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 import { runPool, DEFAULT_CONCURRENCY } from "./concurrency.js";
+
+function sha256Hex(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
 
 function parseRemoteMtimeMs(metadata) {
   const raw = metadata.mtime ?? metadata.mMTime ?? metadata.MTime;
@@ -31,6 +36,7 @@ export async function planSync({ vaultPath, localFiles, remoteItems, prevEntries
   const actions = [];
   const bootstrapCandidates = [];
   const conflictCandidates = [];
+  const verifyCandidates = [];
 
   for (const relPath of allPaths) {
     const loc = localFiles.get(relPath);
@@ -64,13 +70,24 @@ export async function planSync({ vaultPath, localFiles, remoteItems, prevEntries
       if (localChanged) actions.push({ type: "PUSH", relPath, reason: "リモート削除だがローカルは編集済み: 編集を優先" });
       else actions.push({ type: "DELETE_LOCAL", relPath });
     } else if (localChanged && remoteChanged) {
-      // 両側変更。PC側はgitで管理されておりバックアップは不要なので、
-      // mtimeが新しい方をそのまま勝たせて上書きする(本家同様、コンフリクトコピーは作らない)。
+      // 両側変更。ただしどちらもRemotely Save等の別クライアントが「中身は同じだが
+      // touchしただけ(mtime更新/再アップロードでETagだけ変わった)」場合があるため、
+      // まず内容が実際に一致するか確認してから勝敗(mtime比較)を決める。
       conflictCandidates.push({ relPath, loc, rem });
     } else if (localChanged) {
-      actions.push({ type: "PUSH", relPath });
+      // mtime/sizeは変わっているが、暗号化ランダムnonceのせいで別クライアントの
+      // 再アップロードだけでもETagは変わりうる(ここではremote側は不変=remoteChanged false)。
+      // ローカル側だけの変化なので、前回のcontent hashがあれば内容比較で誤検知を弾く。
+      if (prev.localContentHash) {
+        verifyCandidates.push({ relPath, loc, rem, prev, mode: "local" });
+      } else {
+        actions.push({ type: "PUSH", relPath });
+      }
     } else if (remoteChanged) {
-      actions.push({ type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag });
+      // 別クライアント(本家プラグイン等)が中身を変えずに再アップロードしただけの
+      // 可能性がある(暗号化が毎回ランダムnonceのためETagは必ず変わる)。
+      // ダウンロード＆復号して実際に内容が一致するか確認してからPULLするか決める。
+      verifyCandidates.push({ relPath, loc, rem, prev, mode: "remote" });
     } else {
       actions.push({ type: "NOOP", relPath });
     }
@@ -84,7 +101,7 @@ export async function planSync({ vaultPath, localFiles, remoteItems, prevEntries
       const { bytes: remoteBytes, metadata } = await r2.getObject(rem.key);
       const decrypted = await cipher.decryptContent(remoteBytes);
       if (Buffer.from(decrypted).equals(Buffer.from(localBytes))) {
-        actions.push({ type: "SEED", relPath, remoteEtag: rem.etag });
+        actions.push({ type: "SEED", relPath, remoteEtag: rem.etag, localContentHash: sha256Hex(localBytes) });
       } else {
         const localMtimeMs = localFiles.get(relPath).mtimeMs;
         const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
@@ -103,13 +120,44 @@ export async function planSync({ vaultPath, localFiles, remoteItems, prevEntries
 
   if (conflictCandidates.length > 0) {
     await runPool(conflictCandidates, DEFAULT_CONCURRENCY, async ({ relPath, loc, rem }) => {
-      const { metadata } = await r2.headObject(rem.key);
+      const localBytes = await fs.readFile(path.join(vaultPath, ...relPath.split("/")));
+      const { bytes: remoteBytes, metadata } = await r2.getObject(rem.key);
+      const decrypted = await cipher.decryptContent(remoteBytes);
+      if (Buffer.from(decrypted).equals(Buffer.from(localBytes))) {
+        actions.push({ type: "SEED", relPath, remoteEtag: rem.etag, localContentHash: sha256Hex(localBytes), reason: "両側でtouchされたが内容は一致・転送スキップ" });
+        return;
+      }
       const remoteMtimeMs = parseRemoteMtimeMs(metadata) ?? 0;
       actions.push(
         loc.mtimeMs > remoteMtimeMs
           ? { type: "PUSH", relPath, reason: "両側変更・ローカルの方が新しいため上書き" }
           : { type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag, reason: "両側変更・リモートの方が新しいため上書き" }
       );
+    });
+  }
+
+  if (verifyCandidates.length > 0) {
+    await runPool(verifyCandidates, DEFAULT_CONCURRENCY, async ({ relPath, loc, rem, prev, mode }) => {
+      const localBytes = await fs.readFile(path.join(vaultPath, ...relPath.split("/")));
+
+      if (mode === "local") {
+        const hash = sha256Hex(localBytes);
+        if (hash === prev.localContentHash) {
+          actions.push({ type: "SEED", relPath, remoteEtag: rem.etag, localContentHash: hash, reason: "mtime変化のみ・内容一致のため転送スキップ" });
+        } else {
+          actions.push({ type: "PUSH", relPath });
+        }
+        return;
+      }
+
+      // mode === "remote"
+      const { bytes: remoteBytes } = await r2.getObject(rem.key);
+      const decrypted = await cipher.decryptContent(remoteBytes);
+      if (Buffer.from(decrypted).equals(Buffer.from(localBytes))) {
+        actions.push({ type: "SEED", relPath, remoteEtag: rem.etag, localContentHash: sha256Hex(localBytes), reason: "リモート再アップロードのみ・内容一致のため転送スキップ" });
+      } else {
+        actions.push({ type: "PULL", relPath, remoteKey: rem.key, remoteEtag: rem.etag });
+      }
     });
   }
 
@@ -145,7 +193,12 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
         case "NOOP": {
           bump("NOOP");
           const loc = localFiles.get(relPath);
-          newEntries[relPath] = { localMtimeMs: loc.mtimeMs, localSize: loc.size, remoteETag: prevEntries[relPath].remoteETag };
+          newEntries[relPath] = {
+            localMtimeMs: loc.mtimeMs,
+            localSize: loc.size,
+            remoteETag: prevEntries[relPath].remoteETag,
+            localContentHash: prevEntries[relPath].localContentHash,
+          };
           break;
         }
         case "FORGET": {
@@ -156,7 +209,12 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
           bump("SEED");
           if (apply) {
             const loc = localFiles.get(relPath);
-            newEntries[relPath] = { localMtimeMs: loc.mtimeMs, localSize: loc.size, remoteETag: action.remoteEtag };
+            newEntries[relPath] = {
+              localMtimeMs: loc.mtimeMs,
+              localSize: loc.size,
+              remoteETag: action.remoteEtag,
+              localContentHash: action.localContentHash ?? prevEntries[relPath]?.localContentHash,
+            };
           }
           break;
         }
@@ -168,7 +226,7 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
           const encKey = r2Prefix + (await cipher.encryptPath(relPath));
           const loc = localFiles.get(relPath);
           const { etag } = await r2.putObject(encKey, encrypted, { mtime: String(loc.mtimeMs / 1000) });
-          newEntries[relPath] = { localMtimeMs: loc.mtimeMs, localSize: loc.size, remoteETag: etag };
+          newEntries[relPath] = { localMtimeMs: loc.mtimeMs, localSize: loc.size, remoteETag: etag, localContentHash: sha256Hex(bytes) };
           break;
         }
         case "PULL": {
@@ -182,7 +240,7 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
           const mtimeDate = new Date(mtimeMs);
           await fs.utimes(absPath, mtimeDate, mtimeDate);
           const stat = await fs.stat(absPath);
-          newEntries[relPath] = { localMtimeMs: stat.mtimeMs, localSize: stat.size, remoteETag: action.remoteEtag };
+          newEntries[relPath] = { localMtimeMs: stat.mtimeMs, localSize: stat.size, remoteETag: action.remoteEtag, localContentHash: sha256Hex(decrypted) };
           break;
         }
         case "DELETE_REMOTE": {

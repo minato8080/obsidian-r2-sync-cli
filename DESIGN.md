@@ -54,7 +54,7 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 
 ## 同期アルゴリズム（独自3-way比較）
 
-前回同期状態 `.sync-state.json` の各パスごとに `{ localMtimeMs, localSize, remoteETag }` を保持する。毎回の実行で以下を計算する。
+前回同期状態 `.sync-state.json` の各パスごとに `{ localMtimeMs, localSize, remoteETag, localContentHash }` を保持する。毎回の実行で以下を計算する。
 
 1. `localSet` = vault内の現在のファイル一覧（ignoreルール適用後）
 2. `remoteSet` = R2の現在のオブジェクト一覧をfilename復号したもの（`ignore.js`のパターンに一致するキー・legacyメタデータファイル名は無視）
@@ -72,15 +72,31 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 | あり | 消えた | 変化あり | **編集が削除に勝つ** → PULL（リモートの新しい内容でローカルを復元） |
 | あり | 変化なし | 消えた | DELETE_LOCAL |
 | あり | 変化あり | 消えた | **編集が削除に勝つ** → PUSH（ローカルの内容でリモートを復元） |
-| あり | 変化あり | 変化あり | **mtimeが新しい方で上書き**（PUSHまたはPULL） |
-| あり | 変化あり | 変化なし | PUSH |
-| あり | 変化なし | 変化あり | PULL |
+| あり | 変化あり | 変化あり | 内容が**一致するならSEED**（転送スキップ）。**不一致ならmtimeが新しい方で上書き**（PUSHまたはPULL） |
+| あり | 変化あり | 変化なし | 前回の`localContentHash`と**一致するならSEED**（touchのみ）。**不一致ならPUSH** |
+| あり | 変化なし | 変化あり | 内容が**一致するならSEED**（別クライアントの再アップロードのみ）。**不一致ならPULL** |
 | あり | 変化なし | 変化なし | 何もしない |
 
 - ローカルの「変化」判定: mtime(ms)またはsizeが前回と異なるか
 - リモートの「変化」判定: S3の ETag が前回と異なるか（`ListObjectsV2` の結果をそのまま使う。多くのノートは単純PUTなのでETag=MD5として信頼できる）
-- **両側変更時の方針**: PC側はgitで管理しながらの運用なので、コンフリクトコピー(`<name> (conflict ...)`)は作らない。本家Remotely Save同様、単純にmtimeが新しい方をそのまま勝たせて上書きする（ローカルmtime vs リモートの`Metadata.mtime`、`HeadObjectCommand`で軽量に取得。どちらのmtimeも無ければリモート優先）。上書きされた側の変更を復元したい場合はgit履歴から戻す想定。
+- **両側変更時の方針**: PC側はgitで管理しながらの運用なので、コンフリクトコピー(`<name> (conflict ...)`)は作らない。本家Remotely Save同様、単純にmtimeが新しい方をそのまま勝たせて上書きする（ローカルmtime vs リモートの`Metadata.mtime`、`GetObjectCommand`のレスポンスから軽量に取得。どちらのmtimeも無ければリモート優先）。上書きされた側の変更を復元したい場合はgit履歴から戻す想定。
 - 処理後、実際に存在する状態を `.sync-state.json` に書き戻す
+
+### 本家Remotely Save（Obsidianプラグイン）との共存と誤検知防止
+
+本スクリプトの`.sync-state.json`は自分専用の前回状態であり、Obsidian本体のRemotely SaveがPUSH/PULLしても更新されない。そのため本家プラグインとこのCLIを交互に使うと、以下の理由で「実際には中身が変わっていないのに変化ありと誤検知」しやすい:
+
+- Remotely SaveがPULLでローカルファイルを書き換えると、内容が同じでもmtimeは変わる → `localChanged`が誤って立つ。
+- 暗号化は`encryptData`が毎回ランダムnonceを使う仕様（前述）のため、**同じ平文を再アップロードしてもS3のETagは毎回変わる**。Remotely SaveがPUSHすると、内容が同じでも`remoteChanged`が誤って立つ。
+- 上記2つが同時に起きると「両側変更」判定（コンフリクト扱い）にもなり得るが、実体は同一内容の単なる二重反映であることが多い。
+
+これを防ぐため、`localChanged`/`remoteChanged`/両側変更のいずれの分岐でも、**転送を実行する前に実際の内容一致を確認する**（初回実行時の`bootstrapCandidates`と同じ考え方を、状態ファイルがある通常フローにも適用）:
+
+- `localChanged`のみ: 前回記録した`localContentHash`（sha256、`fs.readFile`だけで済みネットワーク不要）と現在のローカル内容のハッシュを比較。一致すれば「touchされただけ」と判断しPUSHせずSEED相当（状態だけ更新）。前回ハッシュが無い（旧状態ファイルからの移行直後など）場合のみ、安全側に倒して従来通りPUSHする。
+- `remoteChanged`のみ: リモートをダウンロード＆復号し、ローカル内容と比較。一致すればPULLせずSEED相当。不一致なら通常通りPULL。
+- 両側変更（コンフリクト）: 同様にリモートをダウンロード＆復号して内容比較を先に行う。一致すればSEED相当（転送なし）。不一致の場合のみ、従来通りmtime比較でPUSH/PULLの勝者を決める。
+
+いずれの場合も、PUSH/PULL/SEEDの結果としてローカル内容のsha256を`.sync-state.json`に書き戻す（PUSH/PULLは転送のためどのみち読んでいるバイト列からハッシュを計算するだけなので追加コストはほぼゼロ、SEEDは判定時に読んだバイト列のハッシュをそのまま流用する）。
 - **初回実行の注意**: `.sync-state.json` が空の状態で、既にRemotely Saveで運用中のバケットに向けて実行すると、ローカル・リモート両方に存在する全ファイルについて内容比較（ダウンロード＆復号）が走る。並列8件・進捗ログ付きで処理する（`planSync`内、`bootstrapCandidates`）。数百〜千件規模だと初回のみ数分かかることがあるが、2回目以降は状態ファイルがあるので通常の軽量な差分比較（mtime/size/ETag比較のみ）に戻る。
 
 ## 除外ルール（`src/ignore.js`）
