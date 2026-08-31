@@ -155,3 +155,87 @@ node dist/r2-sync.bundle.cjs --apply
 
 # バンドルファイル単体を別の場所に持ち出す場合は .env / .sync-state.json をその隣に置く
 ```
+
+## iOS版の実証設計
+
+### 配置と運用境界
+
+iOS用Pythonは本リポジトリからa-ShellのDocuments等へデプロイし、Shortcutsは利用者が設定したブックマークでその実行先を参照する。
+
+```text
+r2-sync/
+├── src/                    # デスクトップNode.js版
+├── ios/                    # iOS用Python版（追加予定）
+├── REQUIREMENTS.md         # プロジェクト要件
+└── DESIGN.md               # デスクトップ＋iOS設計
+
+<consumer-vault>/generated/
+└── r2-sync.bundle.cjs      # 利用者が必要に応じて配置する生成物
+```
+
+### 初期実行経路
+
+```text
+iOS Shortcuts
+  ↓
+a-Shell In App
+  ↓
+ios/pull.py
+  ↓
+Vault全走査 + R2全列挙
+  ↓
+既存PC版と互換の差分判定
+  ↓
+競合があれば適用前に中止
+  ↓
+R2取得・復号 → 一時ファイル → 検証 → 原子的置換
+  ↓
+mtime復元 → 状態チェックポイント更新 → 通知・ログ
+```
+
+初期版はPULL専用で、リモート削除は無視する。Obsidianは閉じるか編集停止状態で実行する。Shortcutsの初回だけVaultフォルダを選択し、以後はブックマークを使う。
+
+### iOS版の差分・状態
+
+- ローカルVaultとR2の双方を全走査し、現行PC版の3-way比較をiOS側でも再現する
+- iOSの状態ファイルはVault外に置く。PC版のプロジェクトルートにある状態ファイルとは端末別に分離する
+- 状態形式は `{ localMtimeMs, localSize, remoteETag, localContentHash }` を基本にPC版と互換にする
+- 状態がない場合はDry Runを先に実行する
+- 1ファイルの置換成功ごとに状態を一時ファイル経由で更新する
+- 状態更新に失敗した場合は同期を失敗扱いにし、次回に再確認する
+
+### iOS版の並列性
+
+- R2確認・取得は最大2並列
+- 復号は取得結果ごとに行う
+- Vaultへの書き込みは初期値1並列
+- 1並列／2並列でVault書き込み時間を比較し、書き込みが支配的かを計測で判断する
+- デスクトップ版の並列数8は変更しない
+
+### iOS版の計測
+
+```text
+t0  Shortcuts起動
+t1  Python開始
+t2  Vault走査完了
+t3  R2一覧完了
+t4  差分判定完了
+t5  R2取得・復号完了
+t6  Vault直接置換完了
+t7  状態更新完了
+t8  Obsidian外部変更認識
+```
+
+- T1 = `t0 → t6`
+- T2 = `t6 → t8`
+- コールドスタートとウォーム実行を分ける
+- 1ファイル、2ファイル、10ファイルで比較する
+- 小さなMarkdownと大きな添付ファイルを分ける
+
+### 将来拡張
+
+R2一覧取得が支配的だった場合のみ、マニフェストまたは一覧キャッシュを検討する。ローカル適用が支配的だった場合は、書き込み並列度、Obsidianの外部変更検知、差分ZIP方式を個別に検証する。PUSH、削除、競合マージは、PULLの相互運用と中断復帰が安定してから追加する。
+
+## 関連
+
+- 要件定義: [REQUIREMENTS.md](REQUIREMENTS.md)
