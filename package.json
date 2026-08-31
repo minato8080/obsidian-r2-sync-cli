@@ -11,6 +11,7 @@
     "sync": "node src/index.js",
     "sync:apply": "node src/index.js --apply",
     "sync:full": "node src/index.js --apply --allow-delete",
+    "setup-hooks": "git config core.hooksPath .githooks",
     "test": "node test-sync.mjs",
     "build": "esbuild src/index.js --bundle --minify --platform=node --target=node18 --format=cjs --outfile=dist/r2-sync.bundle.cjs"
   },

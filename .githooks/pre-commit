@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+node tools/check-public-staged.mjs
+npm test
