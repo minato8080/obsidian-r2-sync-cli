@@ -83,6 +83,8 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 - `NOOP`は変更なしとして集計するだけで、Node版・iOS版とも適用処理、checkpoint更新、適用進捗の対象から除外する
 - 処理後、実際に存在する状態を `.sync-state.json` に書き戻す
 
+iOS版の定常実行では、Vault走査で得たmtime/sizeだけでローカル変更の有無を判定し、mtime/sizeが変わったファイルに限って内容ハッシュを確認する。rclone暗号化ファイル名のAES-EME処理は、AES鍵スケジュールとMixColumns用GF乗算表を再利用し、オブジェクトごとの同一計算を避ける。全体の`scan`時間は`scanLocal`、`listRemote`、`decodeRemote`にも分けて記録する。
+
 ### 本家Remotely Save（Obsidianプラグイン）との共存と誤検知防止
 
 本スクリプトの`.sync-state.json`は自分専用の前回状態であり、Obsidian本体のRemotely SaveがPUSH/PULLしても更新されない。そのため本家プラグインとこのCLIを交互に使うと、以下の理由で「実際には中身が変わっていないのに変化ありと誤検知」しやすい:

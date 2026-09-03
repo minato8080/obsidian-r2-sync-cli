@@ -136,10 +136,11 @@ class PullProbeTests(unittest.TestCase):
             list_remote = mock.Mock(side_effect=remote.list)
             messages = []
 
-            result = execute_full_sync(
-                vault, state, list_remote, remote.get, remote.put, remote.delete,
-                PlainContent(), apply=True, push=True, progress=messages.append,
-            )
+            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("NOOP content was read")):
+                result = execute_full_sync(
+                    vault, state, list_remote, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True, progress=messages.append,
+                )
 
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["unchanged"], 1)
@@ -149,6 +150,9 @@ class PullProbeTests(unittest.TestCase):
             self.assertEqual(result["appliedByType"], {})
             self.assertEqual(list_remote.call_count, 1)
             self.assertEqual(state.read_bytes(), original_state)
+            self.assertIn("scanLocal", result["timingsMs"])
+            self.assertIn("listRemote", result["timingsMs"])
+            self.assertIn("decodeRemote", result["timingsMs"])
             rendered = "\n".join(messages)
             self.assertIn("[NOOP] 1件", rendered)
             self.assertIn("適用対象の変更はありません。", rendered)
@@ -473,6 +477,17 @@ class PullProbeTests(unittest.TestCase):
         tampered[-1] ^= 1
         with self.assertRaises(Exception):
             cipher.decrypt_content(bytes(tampered))
+
+    def test_rclone_filename_components_are_cached(self):
+        cipher = RcloneBase64("test-password")
+        encrypted = cipher.encrypt_path("shared/note.md")
+
+        with mock.patch.object(pull_module, "_eme_transform", wraps=pull_module._eme_transform) as transform:
+            self.assertEqual(cipher.decrypt_path(encrypted), "shared/note.md")
+            first_call_count = transform.call_count
+            self.assertGreater(first_call_count, 0)
+            self.assertEqual(cipher.decrypt_path(encrypted), "shared/note.md")
+            self.assertEqual(transform.call_count, first_call_count)
 
     def test_filename_matches_node_vector(self):
         cipher = RcloneBase64("test-password")

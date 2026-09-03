@@ -59,6 +59,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Obsidianが外部変更を認識するまでのT2は別計測とする
 - R2確認・取得は最大2並列、Vault書き込みは初期値1並列とする
 - PC版の並列数8は変更しない
+- 定常時の全件NOOP判定ではファイル内容を再読込せず、走査で取得したmtime/sizeを前回stateと比較する
+- `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`を個別に返す
 
 ## 受入基準
 

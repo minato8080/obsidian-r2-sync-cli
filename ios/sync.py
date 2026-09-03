@@ -16,6 +16,7 @@ import base64
 import concurrent.futures
 import datetime as _datetime
 import difflib
+import functools
 import hashlib
 import hmac
 import json
@@ -125,9 +126,16 @@ def _make_sbox() -> tuple[int, ...]:
 
 SBOX = _make_sbox()
 INV_SBOX = tuple(SBOX.index(value) for value in range(256))
+GF_MUL_2 = tuple(_gf_mul(value, 2) for value in range(256))
+GF_MUL_3 = tuple(_gf_mul(value, 3) for value in range(256))
+GF_MUL_9 = tuple(_gf_mul(value, 9) for value in range(256))
+GF_MUL_11 = tuple(_gf_mul(value, 11) for value in range(256))
+GF_MUL_13 = tuple(_gf_mul(value, 13) for value in range(256))
+GF_MUL_14 = tuple(_gf_mul(value, 14) for value in range(256))
 
 
-def _aes_round_keys(key: bytes) -> list[bytes]:
+@functools.lru_cache(maxsize=8)
+def _aes_round_keys(key: bytes) -> tuple[bytes, ...]:
     if len(key) not in (16, 24, 32):
         raise PullError("AES key length is invalid")
     nk = len(key) // 4
@@ -144,7 +152,7 @@ def _aes_round_keys(key: bytes) -> list[bytes]:
         elif nk > 6 and i % nk == 4:
             word = [SBOX[x] for x in word]
         words.append([a ^ b for a, b in zip(words[i - nk], word)])
-    return [bytes(sum(words[i : i + 4], [])) for i in range(0, len(words), 4)]
+    return tuple(bytes(sum(words[i : i + 4], [])) for i in range(0, len(words), 4))
 
 
 def _add_key(state: list[int], key: bytes) -> None:
@@ -172,17 +180,17 @@ def _mix_columns(state: list[int], inverse: bool = False) -> None:
         a0, a1, a2, a3 = state[i : i + 4]
         if inverse:
             state[i : i + 4] = [
-                _gf_mul(a0, 14) ^ _gf_mul(a1, 11) ^ _gf_mul(a2, 13) ^ _gf_mul(a3, 9),
-                _gf_mul(a0, 9) ^ _gf_mul(a1, 14) ^ _gf_mul(a2, 11) ^ _gf_mul(a3, 13),
-                _gf_mul(a0, 13) ^ _gf_mul(a1, 9) ^ _gf_mul(a2, 14) ^ _gf_mul(a3, 11),
-                _gf_mul(a0, 11) ^ _gf_mul(a1, 13) ^ _gf_mul(a2, 9) ^ _gf_mul(a3, 14),
+                GF_MUL_14[a0] ^ GF_MUL_11[a1] ^ GF_MUL_13[a2] ^ GF_MUL_9[a3],
+                GF_MUL_9[a0] ^ GF_MUL_14[a1] ^ GF_MUL_11[a2] ^ GF_MUL_13[a3],
+                GF_MUL_13[a0] ^ GF_MUL_9[a1] ^ GF_MUL_14[a2] ^ GF_MUL_11[a3],
+                GF_MUL_11[a0] ^ GF_MUL_13[a1] ^ GF_MUL_9[a2] ^ GF_MUL_14[a3],
             ]
         else:
             state[i : i + 4] = [
-                _gf_mul(a0, 2) ^ _gf_mul(a1, 3) ^ a2 ^ a3,
-                a0 ^ _gf_mul(a1, 2) ^ _gf_mul(a2, 3) ^ a3,
-                a0 ^ a1 ^ _gf_mul(a2, 2) ^ _gf_mul(a3, 3),
-                _gf_mul(a0, 3) ^ a1 ^ a2 ^ _gf_mul(a3, 2),
+                GF_MUL_2[a0] ^ GF_MUL_3[a1] ^ a2 ^ a3,
+                a0 ^ GF_MUL_2[a1] ^ GF_MUL_3[a2] ^ a3,
+                a0 ^ a1 ^ GF_MUL_2[a2] ^ GF_MUL_3[a3],
+                GF_MUL_3[a0] ^ a1 ^ a2 ^ GF_MUL_2[a3],
             ]
 
 
@@ -385,11 +393,26 @@ class RcloneBase64:
         self.data_key = key[:32]
         self.name_key = key[32:64]
         self.name_tweak = key[64:80]
+        self._decrypted_name_cache = {}
+        self._encrypted_name_cache = {}
+
+    @staticmethod
+    def _cache_name(cache: dict[str, str], key: str, value: str) -> str:
+        # A full Vault comfortably fits while still bounding memory for an
+        # unexpectedly large or hostile remote listing.
+        if len(cache) >= 16_384:
+            cache.clear()
+        cache[key] = value
+        return value
 
     def decrypt_path(self, encrypted: str) -> str:
         parts = encrypted.split("/")
         result = []
         for part in parts:
+            cached = self._decrypted_name_cache.get(part)
+            if cached is not None:
+                result.append(cached)
+                continue
             raw = base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
             if not raw or len(raw) % 16:
                 raise PullError("invalid encrypted filename")
@@ -397,16 +420,22 @@ class RcloneBase64:
             pad_size = padded[-1]
             if not 1 <= pad_size <= 16 or padded[-pad_size:] != bytes([pad_size]) * pad_size:
                 raise PullError("invalid encrypted filename padding")
-            result.append(padded[:-pad_size].decode("utf-8"))
+            plain_part = padded[:-pad_size].decode("utf-8")
+            result.append(self._cache_name(self._decrypted_name_cache, part, plain_part))
         return "/".join(result)
 
     def encrypt_path(self, plain: str) -> str:
         result = []
         for part in plain.replace("\\", "/").split("/"):
+            cached = self._encrypted_name_cache.get(part)
+            if cached is not None:
+                result.append(cached)
+                continue
             padded_size = 16 - (len(part.encode("utf-8")) % 16)
             padded = part.encode("utf-8") + bytes([padded_size]) * padded_size
             encrypted = _eme_transform(padded, self.name_tweak, self.name_key, False)
-            result.append(base64.urlsafe_b64encode(encrypted).decode("ascii").rstrip("="))
+            encrypted_part = base64.urlsafe_b64encode(encrypted).decode("ascii").rstrip("=")
+            result.append(self._cache_name(self._encrypted_name_cache, part, encrypted_part))
         return "/".join(result)
 
     def decrypt_content(self, data: bytes) -> bytes:
@@ -1347,16 +1376,23 @@ def execute_full_sync(
     protected_paths.extend(extra_protected_paths or [])
     previous = load_state(state_file)
     _emit_progress(progress, "VaultとR2を走査しています...")
+    scan_local_started = time.perf_counter()
     local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
+    scan_local_ms = round((time.perf_counter() - scan_local_started) * 1000, 2)
+    list_remote_started = time.perf_counter()
     listed = list_remote(remote_prefix)
+    list_remote_ms = round((time.perf_counter() - list_remote_started) * 1000, 2)
+    decode_remote_started = time.perf_counter()
     remotes, ignored_remote, list_conflicts = _collect_remote_objects(
         listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
     )
+    decode_remote_ms = round((time.perf_counter() - decode_remote_started) * 1000, 2)
     _emit_progress(
         progress,
         f"local files: {len(local)}件 / remote objects: {len(listed)}件 / 前回状態: {len(previous)}件",
     )
-    scan_ms = round((time.perf_counter() - started) * 1000, 2)
+    scan_finished = time.perf_counter()
+    scan_ms = round((scan_finished - started) * 1000, 2)
     actions = []
     candidates = []
     conflicts = list(list_conflicts)
@@ -1368,7 +1404,15 @@ def execute_full_sync(
     all_paths = sorted(set(local) | set(remotes) | set(active_previous))
 
     def local_changed(rel_path: str, prev: dict | None) -> bool:
-        return bool(prev and _vault_path(vault, rel_path).is_file() and _local_conflict(vault, rel_path, prev))
+        current = local.get(rel_path)
+        if not prev or not current:
+            return False
+        size_changed = prev.get("localSize") is not None and current["size"] != prev["localSize"]
+        mtime_changed = (
+            prev.get("localMtimeMs") is not None
+            and abs(current["mtimeMs"] - float(prev["localMtimeMs"])) > 1.0
+        )
+        return size_changed or mtime_changed
 
     def remote_changed(remote: dict | None, prev: dict | None) -> bool:
         return bool(remote and prev and remote.get("etag") != prev.get("remoteETag"))
@@ -1422,7 +1466,8 @@ def execute_full_sync(
         else:
             actions.append({"type": "NOOP", "path": rel_path})
 
-    conflict_check_ms = round((time.perf_counter() - started) * 1000, 2) - scan_ms
+    conflict_check_finished = time.perf_counter()
+    conflict_check_ms = round((conflict_check_finished - scan_finished) * 1000, 2)
     prepared_count = 0
 
     def fetch_candidate(candidate):
@@ -1486,7 +1531,7 @@ def execute_full_sync(
             if index % 50 == 0 or index == len(candidates):
                 _emit_progress(progress, f"  取得・検証中: {index}/{len(candidates)}")
 
-    fetch_validate_ms = round((time.perf_counter() - started) * 1000, 2) - scan_ms - conflict_check_ms
+    fetch_validate_ms = round((time.perf_counter() - conflict_check_finished) * 1000, 2)
     unchanged = sum(action["type"] == "NOOP" for action in actions)
     applicable_actions = [action for action in actions if action["type"] != "NOOP"]
     counts = _action_counts(applicable_actions)
@@ -1497,7 +1542,11 @@ def execute_full_sync(
         "scannedLocal": len(local), "scannedRemote": len(listed), "planned": len(applicable_actions), "validated": prepared_count,
         "applied": 0, "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
         "plannedByType": counts, "appliedByType": {}, "skippedByType": {},
-        "timingsMs": {"scan": scan_ms, "conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0},
+        "timingsMs": {
+            "scan": scan_ms, "scanLocal": scan_local_ms, "listRemote": list_remote_ms,
+            "decodeRemote": decode_remote_ms, "conflictCheck": conflict_check_ms,
+            "fetchValidate": fetch_validate_ms, "apply": 0,
+        },
     }
     if conflicts or errors or not apply:
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
