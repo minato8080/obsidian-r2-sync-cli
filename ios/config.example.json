@@ -7,9 +7,6 @@
   "secretAccessKey": "<secret-access-key>",
   "password": "<sync-password>",
   "mode": "full",
-  "allowPush": false,
-  "allowDelete": false,
-  "merge": false,
   "remotePrefix": "",
   "ignoreExtra": []
 }

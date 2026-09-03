@@ -199,15 +199,12 @@ ios/
   "secretAccessKey": "<secret-access-key>",
   "password": "<sync-password>",
   "mode": "full",
-  "allowPush": false,
-  "allowDelete": false,
-  "merge": false,
   "remotePrefix": "",
   "ignoreExtra": []
 }
 ```
 
-`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。`ignoreExtra`はデスクトップ版の追加除外パターンと同じ簡易形式である。`allowPush`、`allowDelete`、`merge`は変更系操作の許可設定で、CLIの`--push`、`--allow-delete`、`--merge`でも一時的に有効化できる。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。CLIの`--full`は設定のmodeより優先してfull同期を実行する。
+`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。fullの`--apply`はPUSH／PULL／自動mergeを実行し、削除だけは`--allow-delete`を追加指定した場合に実行する。`ignoreExtra`はデスクトップ版の追加除外パターンと同じ簡易形式である。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。
 
 `sync.py`はGETとListObjectsV2の署名にAWS SigV4を使い、`rclone-base64`のscrypt／AES-EMEによるファイル名復号と、RCLONEヘッダー・24バイトnonce・64KiB単位のXSalsa20-Poly1305による内容復号を標準ライブラリで行う。ProbeのMarkdownはUTF-8として検証し、full PULLでは復号済みバイト列をそのまま検証済みデータとして扱う。検証済みバイト列だけを同一ディレクトリの一時ファイルへ書き、`os.replace`で置換する。mtimeは一時ファイルへ設定してから置換するため、既存ファイルは取得・復号・検証・一時書き込みの失敗で変更されない。
 
@@ -215,7 +212,7 @@ ios/
 
 ### 初期実行経路
 
-full PULLの実行経路は次の通りである。既存のProbeモードは走査・一覧取得を明示ファイルへ置き換えるが、取得・検証・原子的適用・checkpointの境界は共通である。
+full syncの実行経路は次の通りである。既存のProbeモードは走査・一覧取得を明示ファイルへ置き換えるが、取得・検証・原子的適用・checkpointの境界は共通である。
 
 ```text
 iOS Shortcuts
@@ -243,8 +240,8 @@ ProbeはPULL専用で、full同期では明示許可されたPUSH、remote/local
 - iOSの状態ファイルはVault外に置く。PC版のプロジェクトルートにある状態ファイルとは端末別に分離する
 - 状態形式は `{ localMtimeMs, localSize, remoteETag, localContentHash }` を基本にPC版と互換にする
 - 状態がない場合は、両側に存在するファイルの内容一致を`SEED`、不一致を競合として扱い、Dry Runを先に実行する
-- リモート一覧から消えたオブジェクトは削除許可がなければ保持し、許可時はlocal変更の有無に応じてPUSHまたはDELETE_LOCALを計画する
-- stateへ`baseContentBase64`を保存し、`--merge`時の3-way mergeの共通祖先として利用する。旧stateにbaseがなければ自動mergeせず競合とする
+- リモート一覧から消えたオブジェクトは`--allow-delete`がなければ保持し、指定時はlocal変更の有無に応じてPUSHまたはDELETE_LOCALを計画する
+- stateへ`baseContentBase64`を保存し、3-way mergeの共通祖先として利用する。旧stateにbaseがなければ自動mergeせず競合とする
 - 1ファイルの置換成功ごとに状態を一時ファイル経由で更新する
 - 状態更新に失敗した場合は同期を失敗扱いにし、次回に再確認する
 

@@ -100,15 +100,15 @@ python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json
 python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --apply
 ```
 
-開発環境でVaultとR2を現行同等に全実行する場合は、設定JSONに`"mode": "full"`を指定する。最初の実行はdry-runでVault走査、R2一覧、PULL/PUSH/delete/merge対象の検証だけを行い、結果JSONをShortcutsの通知で確認する。問題がなければ`--apply`を付ける。変更系操作は設定またはコマンドラインで明示的に許可する。
+開発環境でVaultとR2を現行同等に全実行する場合は、設定JSONに`"mode": "full"`を指定する。最初の実行はdry-runでVault走査、R2一覧、PULL/PUSH/delete/merge対象の検証だけを行い、結果JSONをShortcutsの通知で確認する。問題がなければ`--apply`を付ける。PUSHとmergeは`--apply`で実行され、削除だけは`--allow-delete`を追加する。
 
 ```text
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full --push --allow-delete --merge
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full --push --allow-delete --merge --apply
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --apply
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --allow-delete --apply
 ```
 
-full syncは全走査・全列挙を行う。`--push`はローカル変更のR2反映、`--allow-delete`はremote/local削除、`--merge`はstateのbaseを使う3-way mergeを有効にする。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。実R2へ向ける前に、テストバケットと読み取り専用キーでPULLを検証し、PUSH/deleteの実行は専用のテストデータで確認する。
+full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 
 ## 実行のたびに確認すること
 

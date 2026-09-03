@@ -3,7 +3,8 @@
 
 The command accepts configuration and checkpoint paths outside the vault.  It
 supports the small explicit-file Probe as well as a full scan for development
-use.  PUSH, delete, and merge are explicit full-sync options.
+use.  Full sync applies PUSH/PULL/merge with ``--apply`` and applies deletes
+only when ``--allow-delete`` is also supplied.
 """
 
 from __future__ import annotations
@@ -1421,13 +1422,14 @@ def _load_config(path: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="r2-sync iOS PULL")
+    parser = argparse.ArgumentParser(description="r2-sync iOS sync")
     parser.add_argument("--config", required=True, help="JSON config stored outside the vault")
     parser.add_argument("--apply", action="store_true", help="replace vault files and checkpoint state")
-    parser.add_argument("--full", action="store_true", help="scan the vault and all R2 objects")
-    parser.add_argument("--push", action="store_true", help="allow local changes to upload in full mode")
     parser.add_argument("--allow-delete", action="store_true", help="allow planned remote/local deletions in full mode")
-    parser.add_argument("--merge", action="store_true", help="three-way merge both-side text changes in full mode")
+    # Kept hidden so an already-installed Shortcut can be migrated separately.
+    parser.add_argument("--full", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--push", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--merge", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
         config = _load_config(Path(args.config).expanduser())
@@ -1440,20 +1442,11 @@ def main(argv: list[str] | None = None) -> int:
         prefix = prefix + "/" if prefix else ""
         full = args.full or config.get("mode") == "full"
         if full:
-            push = args.push or bool(config.get("allowPush", False))
-            allow_delete = args.allow_delete or bool(config.get("allowDelete", False))
-            merge = args.merge or bool(config.get("merge", False))
-            if push or allow_delete or merge:
-                result = execute_full_sync(
-                    config["vaultPath"], config["statePath"], r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
-                    remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
-                    push=push, allow_delete=allow_delete, merge=merge,
-                )
-            else:
-                result = execute_full(
-                    config["vaultPath"], config["statePath"], r2.list_all, r2.get_object, decoder,
-                    remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
-                )
+            result = execute_full_sync(
+                config["vaultPath"], config["statePath"], r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
+                remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
+                push=True, allow_delete=args.allow_delete, merge=True,
+            )
         else:
             files = config["files"]
             if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):

@@ -32,11 +32,10 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Vaultは利用者が指定するローカルファイル領域を対象にする。特定のVault名や個人環境を前提にしない
 - 現行の同期対象・除外設定を踏襲する
 
-### iOSで明示許可が必要な操作
+### iOSの実行オプション
 
-- PUSHは`--push`または設定の`allowPush: true`が必要
-- リモート／ローカル削除は`--allow-delete`または設定の`allowDelete: true`が必要
-- 3-way mergeは`--merge`または設定の`merge: true`が必要
+- `--apply`がない実行はdry-run。付けるとPUSH／PULL／mergeを実行する
+- リモート／ローカル削除だけは`--allow-delete`が必要
 - iOSバックグラウンド実行の保証
 - 全走査・全量取得に対する5秒保証
 
@@ -48,7 +47,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - R2のmtimeをローカルへ復元する
 - 競合が1件でもあれば、ファイル適用前に同期全体を中止する
 - 取得・書き込みの失敗時は既存ファイルを壊さない
-- 初回または状態消失時はDry Runで差分確認してから適用する。両側に存在するファイルは内容一致ならSEED、不一致ならmtime判定またはmergeを行う
+- 初回または状態消失時はDry Runで差分確認してから適用する。両側に存在するファイルは内容一致ならSEED、不一致ならmtime判定または自動mergeを行う
 - テストR2バケットと読み取り専用キーを使用し、本番データへ直接Probeしない
 
 ### 性能
@@ -80,16 +79,16 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 ### iOS full sync の初回実装範囲
 
 - `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
-- `mode: "full"` または `--full` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
+- `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
 - R2取得・内容確認は最大2並列、Vault書き込みとR2変更は初期値1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
-- PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は明示許可時だけR2またはVaultへ反映する
-- 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定またはmerge設定に従う
+- PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
+- 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
 - stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う
 - リモート一覧から消えたオブジェクトは、削除許可がない場合は保持し、許可時だけローカル削除またはPUSHで処理する
 - PUSH・PULL・merge対象のローカル内容は変更直前に再検査し、競合が1件でもあれば変更を開始しない
 - 成功した操作ごとに、Vault外の状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
-- `--merge`はstateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
+- stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
 
 ## 関連
