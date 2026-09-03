@@ -1,3 +1,4 @@
+import path from "node:path";
 import { config } from "./config.js";
 import { createCipher } from "./crypto.js";
 import { createR2Client } from "./s3.js";
@@ -20,7 +21,24 @@ function groupBy(arr, fn) {
 }
 
 async function main() {
-  const ignoreMatcher = createIgnoreMatcher(config.ignoreExtra);
+  // .envとstateのある実行ディレクトリを、ignoreパターンの基準にする。
+  // 通常はVault内のr2-sync配置ディレクトリと同じになる。
+  const vaultRoot = path.resolve(config.vaultPath);
+  const asVaultRelative = (absolutePath) => {
+    const relative = path.relative(vaultRoot, path.resolve(absolutePath));
+    return relative && relative !== "." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+      ? relative.replace(/\\/g, "/")
+      : null;
+  };
+  const protectedRelPaths = [
+    asVaultRelative(config.stateFilePath),
+    asVaultRelative(path.join(process.cwd(), ".env")),
+  ].filter(Boolean);
+  const ignoreMatcher = createIgnoreMatcher(config.ignoreExtra, {
+    basePath: process.cwd(),
+    vaultPath: config.vaultPath,
+    protectedRelPaths,
+  });
   const cipher = await createCipher(config.syncPassword);
   const r2 = createR2Client(config.r2);
 

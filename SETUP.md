@@ -91,21 +91,21 @@ node dist/r2-sync.bundle.cjs --apply
 
 ## iOS full sync
 
-iOS版は `ios/sync.py` を a-Shell の Documents 等へ配置し、設定JSONと状態JSONはVault外のiOSアプリ領域に置く。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。設定JSONの例は `DESIGN.md` を参照する。
+iOS版は `ios/sync.py` と設定JSON・状態JSONをVault内の専用フォルダへ配置できる。状態JSONは設定JSONと同じフォルダを基準に相対指定でき、設定JSON・状態JSON・状態更新用一時ファイルは同期処理が自動的に同期対象外として扱う。旧版でCWD基準の相対`statePath`に既存stateがある場合はその場所を互換利用し、新規指定は設定JSON基準になる。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。設定JSONの例は `DESIGN.md` を参照する。
 
 Shortcuts の「Run a-Shell script」または a-Shell In App から、次の形で実行する。
 
 ```text
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --apply
+python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
+python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
 ```
 
 開発環境でVaultとR2を現行同等に全実行する場合は、設定JSONに`"mode": "full"`を指定する。最初の実行はdry-runでVault走査、R2一覧、PULL/PUSH/delete/merge対象の検証だけを行い、結果JSONをShortcutsの通知で確認する。問題がなければ`--apply`を付ける。PUSHとmergeは`--apply`で実行され、削除だけは`--allow-delete`を追加する。
 
 ```text
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --apply
-python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --allow-delete --apply
+python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
+python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
+python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --allow-delete --apply
 ```
 
 full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
@@ -113,4 +113,5 @@ full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動merge�
 ## 実行のたびに確認すること
 
 - 両側で変更されたファイルはコンフリクトコピーを作らず、mtimeが新しい方でそのまま上書きする（`reason`にその旨が出る）。上書きされた側の内容を戻したい場合はgit履歴から復元する。
-- 既定で除外されるのは `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` のみ。秘匿フォルダやこのツール自身の配置先など、除外したいパスは自分で `.env` の `IGNORE_EXTRA` に指定すること（`.env.example` に実例あり、`DESIGN.md`の「除外ルール」も参照）。指定を忘れると同期される。
+- `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは自分で `.env` の `IGNORE_EXTRA` に指定すること（`.env.example` に実例あり、`DESIGN.md`の「除外ルール」も参照）。指定を忘れると同期される。
+- ignoreパターンは設定ファイルのあるディレクトリを基準にしたGitignore風glob。専用フォルダに実行ファイルと設定をまとめた場合は`/**`でその配下をすべて除外できる。`/sync.py`は設定ファイルと同じディレクトリ直下、`sync.py`は配下の全階層に一致する。`./sync.py`は旧設定互換で`/sync.py`と同じ。

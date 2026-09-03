@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Dependency-free R2 sync client for iOS/a-Shell.
 
-The command accepts configuration and checkpoint paths outside the vault.  It
-supports the small explicit-file Probe as well as a full scan for development
-use.  Full sync applies PUSH/PULL/merge with ``--apply`` and applies deletes
-only when ``--allow-delete`` is also supplied.
+The command accepts a JSON configuration and may keep its checkpoint next to
+that configuration inside the vault.  The checkpoint is always protected from
+Vault scanning and remote synchronization.  It supports the small explicit-
+file Probe as well as a full scan for development use.  Full sync applies
+PUSH/PULL/merge with ``--apply`` and applies deletes only when
+``--allow-delete`` is also supplied.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import tempfile
 import time
 import urllib.error
@@ -540,12 +543,11 @@ def _vault_path(vault: Path, rel_path: str) -> Path:
     return target
 
 
-def _assert_state_outside_vault(vault: Path, state_path: Path) -> None:
+def _state_rel_path(vault: Path, state_path: Path) -> str | None:
     try:
-        state_path.resolve().relative_to(vault.resolve())
+        return state_path.resolve().relative_to(vault.resolve()).as_posix()
     except ValueError:
-        return
-    raise PullError("statePath must be outside vaultPath")
+        return None
 
 
 def load_state(path: Path) -> dict:
@@ -569,6 +571,14 @@ def save_state(path: Path, entries: dict) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp_name, path)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except (OSError, AttributeError):
+            pass
     finally:
         try:
             os.unlink(temp_name)
@@ -635,7 +645,15 @@ def _local_conflict(vault: Path, rel_path: str, previous: dict | None) -> str | 
     return None
 
 
-def execute_probe(vault_path: str | Path, state_path: str | Path, files: list[dict], fetch, decoder, apply: bool = False) -> dict:
+def execute_probe(
+    vault_path: str | Path,
+    state_path: str | Path,
+    files: list[dict],
+    fetch,
+    decoder,
+    apply: bool = False,
+    extra_protected_paths: list[str] | None = None,
+) -> dict:
     """Fetch and optionally apply explicit PULL files.
 
     ``fetch(key)`` returns RemoteObject and is injectable so all safety tests
@@ -644,7 +662,10 @@ def execute_probe(vault_path: str | Path, state_path: str | Path, files: list[di
     started = time.perf_counter()
     vault = Path(vault_path).expanduser().resolve()
     state_file = Path(state_path).expanduser().resolve()
-    _assert_state_outside_vault(vault, state_file)
+    state_rel_path = _state_rel_path(vault, state_file)
+    protected_paths = [state_rel_path] if state_rel_path else []
+    protected_paths.extend(extra_protected_paths or [])
+    _, is_protected_file = _ignore_matcher([], protected_paths=protected_paths)
     if len(files) < 1 or len(files) > 2:
         raise PullError("Probe accepts one or two files")
     previous = load_state(state_file)
@@ -654,6 +675,8 @@ def execute_probe(vault_path: str | Path, state_path: str | Path, files: list[di
         if not isinstance(raw, dict) or not isinstance(raw.get("path"), str):
             raise PullError("each files entry needs a path")
         rel_path = _safe_relative(raw["path"])
+        if is_protected_file(rel_path):
+            raise PullError("protected file cannot be a Probe sync target")
         conflict = _local_conflict(vault, rel_path, previous.get(rel_path))
         if conflict:
             conflicts.append({"path": rel_path, "reason": conflict})
@@ -709,48 +732,136 @@ def execute_probe(vault_path: str | Path, state_path: str | Path, files: list[di
     return result
 
 
-def _ignore_matcher(extra_patterns: list[str] | None = None):
-    """Return the small generic ignore matcher used by the desktop client."""
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    parts = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*" and index + 1 < len(pattern) and pattern[index + 1] == "*":
+            if index + 2 < len(pattern) and pattern[index + 2] == "/":
+                parts.append("(?:.*/)?")
+                index += 3
+            else:
+                parts.append(".*")
+                index += 2
+        elif char == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif char == "?":
+            parts.append("[^/]")
+            index += 1
+        elif char == "[":
+            end = pattern.find("]", index + 1)
+            if end == -1 or end == index + 1:
+                parts.append(r"\[")
+                index += 1
+            else:
+                content = pattern[index + 1:end].replace("\\", r"\\")
+                if content.startswith("!"):
+                    content = "^" + content[1:]
+                parts.append(f"[{content}]")
+                index = end + 1
+        else:
+            parts.append(re.escape(char))
+            index += 1
+    return re.compile("^" + "".join(parts) + "$")
+
+
+def _join_ignore_path(base_rel_path: str, pattern: str) -> str:
+    parts = [part.strip("/") for part in (base_rel_path, pattern) if part.strip("/")]
+    return "/".join(parts)
+
+
+def _ignore_matcher(
+    extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+):
+    """Return the gitignore-style glob matcher used by the desktop client."""
+    base_rel_path = base_rel_path.replace("\\", "/").strip("/")
+    protected = {path.replace("\\", "/").strip("/") for path in (protected_paths or []) if path}
     parsed = []
     for raw in extra_patterns or []:
         if not isinstance(raw, str):
             continue
-        value = raw.replace("\\", "/").lstrip("/").strip()
+        value = raw.replace("\\", "/").strip()
         if not value:
             continue
-        if value.endswith("/"):
+        legacy_anchored = value.startswith("./")
+        anchored = legacy_anchored or value.startswith("/")
+        if legacy_anchored:
+            value = value[2:]
+        value = value.lstrip("/")
+        dir_only = value.endswith("/")
+        if dir_only:
             value = value[:-1]
-        if value.startswith("**/"):
-            value = value[3:]
-        parsed.append((value, "/" not in value))
+        if not value:
+            continue
+        has_slash = "/" in value
+        parsed.append({
+            "pattern": _join_ignore_path(base_rel_path, value) if anchored or has_slash else value,
+            "any_depth": not anchored and not has_slash,
+            "dir_only": dir_only,
+        })
 
-    def matches_extra(rel_path: str) -> bool:
+    def glob_matches(pattern: str, value: str) -> bool:
+        return bool(_glob_regex(pattern).match(value))
+
+    def path_prefixes(rel_path: str) -> list[str]:
         parts = rel_path.split("/")
-        for value, any_depth in parsed:
-            if any_depth and value in parts:
-                return True
-            if not any_depth and (rel_path == value or rel_path.startswith(value + "/")):
-                return True
+        return ["/".join(parts[:index + 1]) for index in range(len(parts))]
+
+    def under_base(rel_path: str) -> bool:
+        return not base_rel_path or rel_path == base_rel_path or rel_path.startswith(base_rel_path + "/")
+
+    def matches_extra(rel_path: str, is_file: bool) -> bool:
+        if not under_base(rel_path):
+            return False
+        for item in parsed:
+            pattern = item["pattern"]
+            if item["any_depth"]:
+                parts = rel_path.split("/")
+                candidates = parts[:-1] if is_file and item["dir_only"] else parts
+                if any(glob_matches(pattern, part) for part in candidates):
+                    return True
+                continue
+            for prefix in path_prefixes(rel_path):
+                if item["dir_only"] and is_file and prefix == rel_path:
+                    continue
+                if glob_matches(pattern, prefix) or (pattern.endswith("/**") and prefix == pattern[:-3]):
+                    return True
         return False
 
     def ignored_dir(rel_path: str) -> bool:
         name = rel_path.rsplit("/", 1)[-1]
-        return name in {".git", "node_modules"} or matches_extra(rel_path)
+        return name in {".git", "node_modules"} or matches_extra(rel_path, False)
 
     def ignored_file(rel_path: str) -> bool:
         parts = rel_path.split("/")
+        basename = parts[-1]
+        parent = "/".join(parts[:-1])
+        protected_temp = False
+        for protected_path in protected:
+            protected_parts = protected_path.rsplit("/", 1)
+            protected_parent = protected_parts[0] if len(protected_parts) == 2 else ""
+            protected_name = protected_parts[-1]
+            if parent == protected_parent and basename.startswith(f".{protected_name}.") and basename.endswith(".tmp"):
+                protected_temp = True
+                break
         return (
-            parts[-1] in {".DS_Store", "Thumbs.db"}
+            rel_path in protected
+            or protected_temp
+            or basename in {".DS_Store", "Thumbs.db"}
             or any(part in {".git", "node_modules"} for part in parts[:-1])
-            or matches_extra(rel_path)
+            or matches_extra(rel_path, True)
         )
 
     return ignored_dir, ignored_file
 
 
-def _scan_vault(vault: Path, extra_patterns: list[str] | None = None) -> dict[str, dict]:
+def _scan_vault(
+    vault: Path, extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+) -> dict[str, dict]:
     """Recursively list regular files without following directory symlinks."""
-    ignored_dir, ignored_file = _ignore_matcher(extra_patterns)
+    ignored_dir, ignored_file = _ignore_matcher(extra_patterns, base_rel_path, protected_paths)
     result = {}
 
     def walk(directory: Path, rel_dir: str) -> None:
@@ -801,13 +912,15 @@ def _entry_from_stat(stat: os.stat_result, etag: str | None, data: bytes | None 
     }
 
 
-def _collect_remote_objects(listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None) -> tuple[dict[str, dict], list[dict], list[dict]]:
+def _collect_remote_objects(
+    listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+) -> tuple[dict[str, dict], list[dict], list[dict]]:
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
     remotes = {}
     ignored = []
     conflicts = []
-    _, ignored_file = _ignore_matcher(extra_patterns)
+    _, ignored_file = _ignore_matcher(extra_patterns, base_rel_path, protected_paths)
     for raw in listed:
         if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
             conflicts.append({"path": "<remote-list>", "reason": "R2 LIST returned an invalid object"})
@@ -943,14 +1056,18 @@ def execute_full(
     remote_prefix: str = "",
     extra_patterns: list[str] | None = None,
     apply: bool = False,
+    ignore_base_rel_path: str = "",
+    extra_protected_paths: list[str] | None = None,
 ) -> dict:
     """Run a full, PULL-only scan with all writes deferred until validation."""
     started = time.perf_counter()
     vault = Path(vault_path).expanduser().resolve()
     state_file = Path(state_path).expanduser().resolve()
-    _assert_state_outside_vault(vault, state_file)
+    state_rel_path = _state_rel_path(vault, state_file)
+    protected_paths = [state_rel_path] if state_rel_path else []
+    protected_paths.extend(extra_protected_paths or [])
     previous = load_state(state_file)
-    local = _scan_vault(vault, extra_patterns)
+    local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
 
@@ -967,7 +1084,7 @@ def execute_full(
 
     remotes = {}
     ignored_remote = []
-    _, ignored_file = _ignore_matcher(extra_patterns)
+    _, ignored_file = _ignore_matcher(extra_patterns, ignore_base_rel_path, protected_paths)
     for raw in listed:
         if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
             return {
@@ -1157,6 +1274,8 @@ def execute_full_sync(
     push: bool = False,
     allow_delete: bool = False,
     merge: bool = False,
+    ignore_base_rel_path: str = "",
+    extra_protected_paths: list[str] | None = None,
 ) -> dict:
     """Run the opt-in full bidirectional sync path.
 
@@ -1167,16 +1286,25 @@ def execute_full_sync(
     started = time.perf_counter()
     vault = Path(vault_path).expanduser().resolve()
     state_file = Path(state_path).expanduser().resolve()
-    _assert_state_outside_vault(vault, state_file)
+    state_rel_path = _state_rel_path(vault, state_file)
+    protected_paths = [state_rel_path] if state_rel_path else []
+    protected_paths.extend(extra_protected_paths or [])
     previous = load_state(state_file)
-    local = _scan_vault(vault, extra_patterns)
+    local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
     listed = list_remote(remote_prefix)
-    remotes, ignored_remote, list_conflicts = _collect_remote_objects(listed, decoder, remote_prefix, extra_patterns)
+    remotes, ignored_remote, list_conflicts = _collect_remote_objects(
+        listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
+    )
     scan_ms = round((time.perf_counter() - started) * 1000, 2)
     actions = []
     candidates = []
     conflicts = list(list_conflicts)
-    all_paths = sorted(set(local) | set(remotes) | set(previous))
+    # An ignored file can still be present in an old checkpoint.  Filter only
+    # ignored paths here: absent non-ignored paths must remain so FORGET and
+    # delete planning can observe that both sides disappeared.
+    _, ignored_file = _ignore_matcher(extra_patterns, ignore_base_rel_path, protected_paths)
+    active_previous = {path: entry for path, entry in previous.items() if not ignored_file(path)}
+    all_paths = sorted(set(local) | set(remotes) | set(active_previous))
 
     def local_changed(rel_path: str, prev: dict | None) -> bool:
         return bool(prev and _vault_path(vault, rel_path).is_file() and _local_conflict(vault, rel_path, prev))
@@ -1189,16 +1317,19 @@ def execute_full_sync(
 
     for rel_path in all_paths:
         target = _vault_path(vault, rel_path)
-        has_local = target.is_file()
+        # `target` may exist on disk while the scanner intentionally omitted it
+        # because it matches ignoreExtra.  Only the scanner result is a valid
+        # local sync candidate.
+        has_local = rel_path in local
         remote = remotes.get(rel_path)
-        prev = previous.get(rel_path)
+        prev = active_previous.get(rel_path)
         if not prev:
             if has_local and remote:
                 candidates.append({"type": "BOOTSTRAP", "path": rel_path, "remote": remote, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
             elif has_local:
                 actions.append({"type": "PUSH", "path": rel_path, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
             elif remote:
-                add_pull(rel_path, remote, False)
+                candidates.append({"type": "NEW_REMOTE", "path": rel_path, "remote": remote})
             continue
 
         loc_gone = not has_local and prev.get("localMtimeMs") is not None
@@ -1209,7 +1340,7 @@ def execute_full_sync(
             actions.append({"type": "FORGET", "path": rel_path})
         elif loc_gone and not rem_gone:
             if remote_is_changed:
-                add_pull(rel_path, remote, False, "local deleted but remote changed")
+                candidates.append({"type": "RESTORE_REMOTE_CHANGED", "path": rel_path, "remote": remote, "reason": "local deleted but remote changed"})
             else:
                 actions.append({"type": "DELETE_REMOTE", "path": rel_path, "remote": remote})
         elif not loc_gone and rem_gone:
@@ -1254,6 +1385,8 @@ def execute_full_sync(
                 elif candidate["type"] == "REMOTE_CHANGED":
                     add_pull(path_name, remote_info, True)
                     actions[-1].update({"data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest()})
+                elif candidate["type"] in ("NEW_REMOTE", "RESTORE_REMOTE_CHANGED"):
+                    actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": False, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "reason": candidate.get("reason")})
                 elif candidate["type"] == "BOOTSTRAP" and remote_bytes == local_bytes:
                     actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes})
                 elif candidate["type"] == "BOOTSTRAP":
@@ -1302,18 +1435,54 @@ def execute_full_sync(
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
-    # Recheck local bytes for every operation before the first remote or local mutation.
+    # Recheck local state for every operation before the first remote or local mutation.
     for action in actions:
         path_name = action["path"]
         target = _vault_path(vault, path_name)
-        if action["type"] in ("PUSH", "MERGE"):
+        if action["type"] in ("PUSH", "MERGE", "SEED"):
             expected_hash = action.get("localSnapshotHash") or hashlib.sha256(action.get("localBytes", b"")).hexdigest()
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
                 result["conflicts"].append({"path": path_name, "reason": "local file changed during planning"})
-        elif action["type"] in ("PULL", "DELETE_LOCAL") and action.get("localSnapshotHash"):
+        elif action["type"] == "PULL":
+            if action.get("hadLocal"):
+                expected_hash = action.get("localSnapshotHash")
+                if not expected_hash or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
+                    result["conflicts"].append({"path": path_name, "reason": "local file changed during fetch"})
+            elif target.exists():
+                result["conflicts"].append({"path": path_name, "reason": "target appeared during fetch"})
+        elif action["type"] == "DELETE_LOCAL" and action.get("localSnapshotHash"):
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != action["localSnapshotHash"]:
-                result["conflicts"].append({"path": path_name, "reason": "local file changed during fetch"})
+                result["conflicts"].append({"path": path_name, "reason": "local file changed during planning"})
+        elif action["type"] in ("DELETE_REMOTE", "FORGET") and target.exists():
+            result["conflicts"].append({"path": path_name, "reason": "local file appeared during planning"})
+        elif action["type"] == "NOOP":
+            conflict = _local_conflict(vault, path_name, previous.get(path_name))
+            if conflict:
+                result["conflicts"].append({"path": path_name, "reason": conflict})
     if result["conflicts"]:
+        result["ok"] = False
+        result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
+        return result
+
+    # A second full listing closes the fetch/validation window.  Any change in
+    # the remote snapshot aborts the whole batch before its first mutation.
+    try:
+        latest_listed = list_remote(remote_prefix)
+        latest_remotes, _, latest_conflicts = _collect_remote_objects(
+            latest_listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
+        )
+        result["conflicts"].extend(latest_conflicts)
+        snapshot_paths = sorted(set(remotes) | set(latest_remotes))
+        for path_name in snapshot_paths:
+            before = remotes.get(path_name)
+            after = latest_remotes.get(path_name)
+            before_identity = None if before is None else (before.get("key"), before.get("etag"), before.get("size"), before.get("lastModified"))
+            after_identity = None if after is None else (after.get("key"), after.get("etag"), after.get("size"), after.get("lastModified"))
+            if before_identity != after_identity:
+                result["conflicts"].append({"path": path_name, "reason": "remote object changed during planning"})
+    except Exception as error:
+        result["errors"].append({"path": "<remote-list>", "error": str(error)})
+    if result["conflicts"] or result["errors"]:
         result["ok"] = False
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
@@ -1354,8 +1523,8 @@ def execute_full_sync(
                 result["applied"] += 1
                 bump(result["appliedByType"], action_type)
             elif action_type == "MERGE":
-                etag = put(action["remote"]["key"], decoder.encrypt_content(action["data"]), action["localMtimeMs"])
                 atomic_replace(target, action["data"], action["localMtimeMs"])
+                etag = put(action["remote"]["key"], decoder.encrypt_content(action["data"]), action["localMtimeMs"])
                 checkpoint(path_name, etag, action["data"])
                 result["applied"] += 1
                 bump(result["appliedByType"], action_type)
@@ -1397,6 +1566,28 @@ def _remote_key(decoder, remote_prefix: str, rel_path: str) -> str:
     return prefix + encoded
 
 
+def _ignore_base_rel_path(vault_path: str | Path, config_path: Path) -> str:
+    """Return the config directory relative to the vault, or empty for legacy external configs."""
+    vault = Path(vault_path).expanduser().resolve()
+    base = config_path.expanduser().resolve().parent
+    try:
+        relative = base.relative_to(vault).as_posix()
+        return "" if relative == "." else relative
+    except ValueError:
+        return ""
+
+
+def _config_relative_path(value: str | Path, config_path: Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    config_relative = (config_path.parent / path).resolve()
+    legacy_cwd_relative = path.resolve()
+    if config_relative != legacy_cwd_relative and not config_relative.exists() and legacy_cwd_relative.exists():
+        return legacy_cwd_relative
+    return config_relative
+
+
 def _load_config(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8") as stream:
@@ -1423,7 +1614,7 @@ def _load_config(path: Path) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="r2-sync iOS sync")
-    parser.add_argument("--config", required=True, help="JSON config stored outside the vault")
+    parser.add_argument("--config", required=True, help="path to the JSON config")
     parser.add_argument("--apply", action="store_true", help="replace vault files and checkpoint state")
     parser.add_argument("--allow-delete", action="store_true", help="allow planned remote/local deletions in full mode")
     # Kept hidden so an already-installed Shortcut can be migrated separately.
@@ -1432,7 +1623,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--merge", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
-        config = _load_config(Path(args.config).expanduser())
+        config_path = Path(args.config).expanduser().resolve()
+        config = _load_config(config_path)
+        ignore_base_rel_path = _ignore_base_rel_path(config["vaultPath"], config_path)
+        state_path = _config_relative_path(config["statePath"], config_path)
+        config_rel_path = _state_rel_path(Path(config["vaultPath"]).expanduser().resolve(), config_path)
+        extra_protected_paths = [config_rel_path] if config_rel_path else []
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):
             raise PullError("encryption must be rclone-base64 or plain")
@@ -1443,9 +1639,10 @@ def main(argv: list[str] | None = None) -> int:
         full = args.full or config.get("mode") == "full"
         if full:
             result = execute_full_sync(
-                config["vaultPath"], config["statePath"], r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
+                config["vaultPath"], state_path, r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
                 remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
-                push=True, allow_delete=args.allow_delete, merge=True,
+                push=True, allow_delete=args.allow_delete, merge=True, ignore_base_rel_path=ignore_base_rel_path,
+                extra_protected_paths=extra_protected_paths,
             )
         else:
             files = config["files"]
@@ -1454,7 +1651,10 @@ def main(argv: list[str] | None = None) -> int:
             for item in files:
                 if not item.get("key"):
                     item["key"] = prefix + (decoder.encrypt_path(_safe_relative(item["path"])) if mode == "rclone-base64" else _safe_relative(item["path"]))
-            result = execute_probe(config["vaultPath"], config["statePath"], files, r2.get_object, decoder, args.apply)
+            result = execute_probe(
+                config["vaultPath"], state_path, files, r2.get_object, decoder, args.apply,
+                extra_protected_paths=extra_protected_paths,
+            )
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0 if result["ok"] else 1
     except PullError as error:

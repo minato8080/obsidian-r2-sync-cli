@@ -110,10 +110,12 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 .DS_Store, Thumbs.db   ← OSが生成するゴミファイル
 ```
 
-それ以外（秘匿フォルダ、このツール自身の配置先、Obsidianの端末固有UI状態ファイルなど）は全て `.env` の `IGNORE_EXTRA` で利用者が指定する（`.env.example` に記法と実例あり）。
+Node版の`.env`と同期state、iOS版の設定JSON・同期state・state更新用一時ファイルは、Vault内にある場合も実装が自動的に除外する。それ以外（秘匿フォルダ、このツール自身の配置先、Obsidianの端末固有UI状態ファイルなど）は `.env` の `IGNORE_EXTRA` で利用者が指定する（`.env.example` に記法と実例あり）。
+
+追加パターンは設定ファイルのあるディレクトリを基準にしたGitignore風globとして解釈する。先頭`/`を付けると基準ディレクトリ直下に固定し、`foo/bar`のようにスラッシュを含むパターンも基準ディレクトリからの相対パスになる。`sync.py`のようにスラッシュを含まないパターンは基準ディレクトリ以下の全階層に一致する。末尾`/`はディレクトリと配下、`*`と`?`は`/`をまたがず、`**`は複数階層をまたぐ。`./path`は旧設定互換で`/path`と同じ扱いにする。例えば設定ファイルをVault内の`tools/`へ置き、`ignoreExtra`に`/**`を指定すると、`tools/`配下の実行ファイル・設定・state・生成物をすべて除外できる。Node版の`IGNORE_EXTRA`とiOS版の`ignoreExtra`はこの記法を共有し、ローカル走査と復号後のR2一覧の両方へ適用する。設定ファイルがVault外にある旧構成では、互換のためVaultルートを基準にする。
 
 - **`_remotely-save-metadata-on-remote.json` / `.bin`（レガシーファイル）を個別にハードコード除外する必要はない**: このファイル名はリモート上では暗号化されない生のファイル名で保存されるため、`planSync`が`cipher.decryptPath()`を試みた時点で復号エラーになり、既存の`try/catch`で自動的にスキップされる（`src/sync.js`）。ローカルに同名ファイルが実在する可能性はほぼ無視できるため、特別扱いは不要。
-- **接続情報が絡むファイル(`.obsidian/plugins/remotely-save/data.json`等)や秘匿フォルダ(`private/`等)を同期対象から外したい場合は、`IGNORE_EXTRA`に明示的に追加すること**。ツール側は安全側のデフォルトを持たないので、これを怠ると同期される（暗号化はされるが、資格情報が絡むファイルを同期に含めたくない場合は必ず設定する）。
+- **上記の自動保護対象以外で接続情報が絡むファイル(`.obsidian/plugins/remotely-save/data.json`等)や秘匿フォルダ(`private/`等)を同期対象から外したい場合は、`IGNORE_EXTRA`に明示的に追加すること**。指定しないファイルは同期されるため、資格情報が絡むファイルを同期に含めたくない場合は必ず設定する。
 
 ## 安全機構
 
@@ -175,16 +177,16 @@ r2-sync/
 
 #### iOS PULL のファイル構成
 
-PULL実行ではVault内に設定・状態・ログを置かない。設定JSONと状態JSONはShortcutsまたはa-Shellが利用できるアプリ領域など、Vault外の利用者管理領域に置く。
+PULL実行では、設定JSONと状態JSONをVault内の専用ディレクトリへ置いて管理できる。設定JSON、状態JSON、状態更新用一時ファイルは同期処理が自動的に保護し、Vault走査・R2一覧のどちらからも同期対象外にする。公開リポジトリには実値を置かず、設定例はプレースホルダーだけにする。
 
 ```text
 ios/
 ├── sync.py                 # 標準ライブラリだけで動くiOS同期実行点
 └── test_sync.py            # R2を使わない安全性・暗号のテスト
 
-<ios-app-data>/
+<vault-path>/r2-sync-tools/
 ├── r2-sync-config.json     # 実値は利用者が作成。リポジトリには含めない
-└── r2-sync-state.json      # 端末専用状態。Vault外に自動生成
+└── r2-sync-state.json      # 同期処理が自動的に同期対象外として扱う
 ```
 
 設定JSONの例は次のようにプレースホルダーだけで記載する。アクセスキー、パスワード、実際のVaultパスはリポジトリへ保存しない。
@@ -192,7 +194,7 @@ ios/
 ```json
 {
   "vaultPath": "<vault-path>",
-  "statePath": "<ios-app-data>/r2-sync-state.json",
+  "statePath": "<vault-path>/r2-sync-tools/r2-sync-state.json",
   "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
   "bucket": "<bucket-name>",
   "accessKeyId": "<access-key-id>",
@@ -200,15 +202,17 @@ ios/
   "password": "<sync-password>",
   "mode": "full",
   "remotePrefix": "",
-  "ignoreExtra": []
+  "ignoreExtra": [
+    "/**"
+  ]
 }
 ```
 
-`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。fullの`--apply`はPUSH／PULL／自動mergeを実行し、削除だけは`--allow-delete`を追加指定した場合に実行する。`ignoreExtra`はデスクトップ版の追加除外パターンと同じ簡易形式である。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。
+`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。fullの`--apply`はPUSH／PULL／自動mergeを実行し、削除だけは`--allow-delete`を追加指定した場合に実行する。`ignoreExtra`はデスクトップ版の追加除外パターンと同じGitignore風globである。設定ファイルをVault内の専用ディレクトリに置いて`/**`を指定すると、そのディレクトリ配下の実行ファイル・設定・state・生成物をまとめて除外できる。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。
 
 `sync.py`はGETとListObjectsV2の署名にAWS SigV4を使い、`rclone-base64`のscrypt／AES-EMEによるファイル名復号と、RCLONEヘッダー・24バイトnonce・64KiB単位のXSalsa20-Poly1305による内容復号を標準ライブラリで行う。ProbeのMarkdownはUTF-8として検証し、full PULLでは復号済みバイト列をそのまま検証済みデータとして扱う。検証済みバイト列だけを同一ディレクトリの一時ファイルへ書き、`os.replace`で置換する。mtimeは一時ファイルへ設定してから置換するため、既存ファイルは取得・復号・検証・一時書き込みの失敗で変更されない。
 
-適用前に全対象のローカル競合を検査する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。PUSHとmerge後のR2 PUT成功後にローカル置換が失敗するような異種システム間の中断は、次回のstate／ETag再検査で収束させる。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含め、Shortcutsの通知へ渡せるようにする。
+適用前に全対象のローカル競合を検査し、R2一覧も再取得して最初の一覧snapshotと比較する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。mergeはローカルを原子的に置換してからR2へPUTするため、ローカル置換失敗時にremoteだけが更新されることはない。後続のR2 PUTが失敗した場合、stateは更新せず、次回に変更済みローカル内容を再計画する。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含め、Shortcutsの通知へ渡せるようにする。
 
 ### 初期実行経路
 
@@ -237,7 +241,7 @@ ProbeはPULL専用で、full同期では明示許可されたPUSH、remote/local
 ### iOS版の差分・状態
 
 - ローカルVaultとR2の双方を全走査し、PULLに必要な範囲で現行PC版の3-way比較を再現する
-- iOSの状態ファイルはVault外に置く。PC版のプロジェクトルートにある状態ファイルとは端末別に分離する
+- iOSの状態ファイルは設定ファイル基準で配置でき、Vault内に置く場合も同期対象から強制除外する。PC版のプロジェクトルートにある状態ファイルとは端末別に分離する
 - 状態形式は `{ localMtimeMs, localSize, remoteETag, localContentHash }` を基本にPC版と互換にする
 - 状態がない場合は、両側に存在するファイルの内容一致を`SEED`、不一致を競合として扱い、Dry Runを先に実行する
 - リモート一覧から消えたオブジェクトは`--allow-delete`がなければ保持し、指定時はlocal変更の有無に応じてPUSHまたはDELETE_LOCALを計画する

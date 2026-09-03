@@ -41,7 +41,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 ### 安全性
 
-- 同期状態とログはVault外のiOSアプリ領域に置く
+- 同期状態は設定ファイルと同じVault内フォルダへ置ける。ログは結果出力として扱い、Vault内へ自動保存しない
 - 状態形式はPC版と互換にするが、端末ごとの状態ファイルは共有しない
 - 取得物は一時ファイルへ保存し、検証後に原子的置換を行う
 - R2のmtimeをローカルへ復元する
@@ -81,12 +81,13 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
 - R2取得・内容確認は最大2並列、Vault書き込みとR2変更は初期値1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
+- `IGNORE_EXTRA`と`ignoreExtra`は設定ファイルのあるディレクトリを基準にしたGitignore風globを指定できる。先頭`/`は基準ディレクトリ直下、スラッシュなしのパターンは基準ディレクトリ以下の全階層、`*`・`?`・`[]`・`**`・末尾`/`をサポートし、Node版とiOS版で挙動を揃える。`./path`は旧設定互換で`/path`と同じ扱いにする
 - PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
 - 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
 - stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う
 - リモート一覧から消えたオブジェクトは、削除許可がない場合は保持し、許可時だけローカル削除またはPUSHで処理する
-- PUSH・PULL・merge対象のローカル内容は変更直前に再検査し、競合が1件でもあれば変更を開始しない
-- 成功した操作ごとに、Vault外の状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする
+- PUSH・PULL・merge対象のローカル内容を変更開始前に再検査し、R2一覧も再取得して当初のremote snapshotと比較する。競合が1件でもあれば変更を開始しない
+- 成功した操作ごとに、設定ファイル基準で指定した状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする。Vault内にある設定ファイル、状態ファイル、状態更新用一時ファイルは、Vault走査・R2一覧から強制除外して同期しない
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する

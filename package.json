@@ -12,7 +12,7 @@
     "sync:apply": "node src/index.js --apply",
     "sync:full": "node src/index.js --apply --allow-delete",
     "setup-hooks": "git config core.hooksPath .githooks",
-    "test": "node test-sync.mjs",
+    "test": "node test-ignore.mjs && node test-sync.mjs",
     "test:ios": "python -m unittest ios.test_sync",
     "build": "esbuild src/index.js --bundle --minify --platform=node --target=node18 --format=cjs --outfile=dist/r2-sync.bundle.cjs"
   },

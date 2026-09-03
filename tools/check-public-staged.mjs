@@ -12,6 +12,8 @@ const stagedFiles = git(["diff", "--cached", "--name-only", "--diff-filter=ACMR"
 const forbiddenFilePatterns = [
   { pattern: /(^|\/)\.env$/i, label: "実値の.env" },
   { pattern: /(^|\/)\.sync-state(?:\.json)?$/i, label: "同期状態ファイル" },
+  { pattern: /(^|\/)r2-sync-state\.json$/i, label: "iOS同期状態ファイル" },
+  { pattern: /(^|\/)r2-sync-config\.json$/i, label: "iOS実値設定ファイル" },
   { pattern: /\.(?:log|trace)$/i, label: "ログファイル" },
 ];
 

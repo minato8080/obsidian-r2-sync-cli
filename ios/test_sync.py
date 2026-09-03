@@ -16,8 +16,12 @@ try:
         RcloneBase64,
         execute_full_sync,
         _aes_block,
+        _config_relative_path,
+        _ignore_base_rel_path,
+        _ignore_matcher,
         _poly1305,
         _xsalsa_stream,
+        _scan_vault,
         execute_full,
         execute_probe,
         load_state,
@@ -32,8 +36,12 @@ except ImportError:
     RcloneBase64,
     execute_full_sync,
     _aes_block,
+    _config_relative_path,
+    _ignore_base_rel_path,
+    _ignore_matcher,
     _poly1305,
     _xsalsa_stream,
+    _scan_vault,
     execute_full,
     execute_probe,
     load_state,
@@ -86,6 +94,239 @@ def encrypt_content_for_test(clear, cipher, nonce):
 
 
 class PullProbeTests(unittest.TestCase):
+    def test_local_deleted_remote_changed_pull_has_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            state = Path(root) / "state.json"
+            state.write_text(json.dumps({"version": 1, "entries": {
+                "note.md": {"localMtimeMs": 1, "localSize": 3, "remoteETag": "old"}
+            }}), encoding="utf-8")
+            remote = FakeRemote({"note.md": RemoteObject(b"remote-new", "new", {})})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual((vault / "note.md").read_bytes(), b"remote-new")
+
+    def test_new_remote_aborts_if_target_appears_during_fetch(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"note.md": RemoteObject(b"remote", "e1", {})})
+
+            def fetch(key):
+                (vault / "note.md").write_bytes(b"concurrent-local")
+                return remote.get(key)
+
+            result = execute_full_sync(
+                vault, state, remote.list, fetch, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual((vault / "note.md").read_bytes(), b"concurrent-local")
+
+    def test_vault_root_config_uses_empty_ignore_base(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            config = vault / "config.json"
+            config.write_text("{}", encoding="utf-8")
+            (vault / "keep.md").write_text("keep", encoding="utf-8")
+            base = _ignore_base_rel_path(vault, config)
+            self.assertEqual(base, "")
+            self.assertEqual(_scan_vault(vault, ["/**"], base), {})
+
+    def test_both_gone_path_is_forgotten_from_checkpoint(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            state = Path(root) / "state.json"
+            state.write_text(json.dumps({"version": 1, "entries": {
+                "gone.md": {"localMtimeMs": 1, "localSize": 4, "remoteETag": "old"}
+            }}), encoding="utf-8")
+            remote = FakeRemote({})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["plannedByType"].get("FORGET"), 1)
+            self.assertNotIn("gone.md", load_state(state))
+
+    def test_state_and_checkpoint_temp_are_protected(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = vault / "tools" / "state.json"
+            state.parent.mkdir(parents=True)
+            state.write_text(json.dumps({"version": 1, "entries": {}}), encoding="utf-8")
+            orphan = state.parent / ".state.json.interrupted.tmp"
+            orphan.write_text("checkpoint fragment", encoding="utf-8")
+            remote = FakeRemote({"tools/state.json": RemoteObject(b"remote-state", "state-etag", {})})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, allow_delete=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["planned"], 0)
+            self.assertEqual(set(remote.objects), {"tools/state.json"})
+
+    def test_config_is_protected_without_ignore_pattern(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            config = vault / "tools" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text("local config", encoding="utf-8")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"tools/config.json": RemoteObject(b"remote config", "config-etag", {})})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, allow_delete=True,
+                extra_protected_paths=["tools/config.json"],
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["planned"], 0)
+            self.assertEqual(config.read_text(encoding="utf-8"), "local config")
+            self.assertEqual(remote.objects["tools/config.json"].data, b"remote config")
+
+    def test_state_path_is_config_relative_with_legacy_existing_fallback(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            config = root_path / "tools" / "config.json"
+            expected = config.parent / "state.json"
+            self.assertEqual(_config_relative_path("state.json", config), expected.resolve())
+            absolute = (root_path / "absolute-state.json").resolve()
+            self.assertEqual(_config_relative_path(absolute, config), absolute)
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(root_path)
+                legacy = root_path / "legacy-state.json"
+                legacy.write_text("{}", encoding="utf-8")
+                self.assertEqual(_config_relative_path("legacy-state.json", config), legacy.resolve())
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_gitignore_negated_character_class(self):
+        _, ignored_file = _ignore_matcher(["**/secret[!0].md"], "tools")
+        self.assertFalse(ignored_file("tools/secret0.md"))
+        self.assertTrue(ignored_file("tools/secret1.md"))
+        self.assertTrue(ignored_file("tools/nested/secret2.md"))
+
+    def test_remote_change_after_initial_list_aborts_before_push(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            state = Path(root) / "state.json"
+            target = vault / "note.md"
+            target.write_bytes(b"base")
+            remote = FakeRemote({"note.md": RemoteObject(b"base", "base-etag", {})})
+            self.assertTrue(execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )["ok"])
+            target.write_bytes(b"local-new")
+
+            def stale_list(prefix=""):
+                snapshot = remote.list(prefix)
+                remote.objects["note.md"] = RemoteObject(b"concurrent-remote", "concurrent-etag", {})
+                return snapshot
+
+            result = execute_full_sync(
+                vault, state, stale_list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(remote.objects["note.md"].data, b"concurrent-remote")
+
+    def test_config_relative_ignore_globs(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            (vault / "tools").mkdir(parents=True)
+            for rel_path in (
+                "tools/sync.py", "tools/r2-sync-config.json", "tools/nested/sync.py", "tools/nested/r2-sync-config.json",
+                "tools/generated/note.md", "tools/generated/config.json", "tools/generated/deep/config.json",
+                "tools/nested/secret1.md", "notes/secret1.md", "keep.md",
+            ):
+                target = vault / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(rel_path, encoding="utf-8")
+            files = _scan_vault(vault, ["/sync.py", "/r2-sync-config.json", "/generated/"], "tools")
+            self.assertEqual(sorted(files), [
+                "keep.md", "notes/secret1.md", "tools/nested/r2-sync-config.json", "tools/nested/secret1.md", "tools/nested/sync.py",
+            ])
+            any_depth = _scan_vault(vault, ["sync.py"], "tools")
+            self.assertNotIn("tools/sync.py", any_depth)
+            self.assertNotIn("tools/nested/sync.py", any_depth)
+
+            all_tool_files = _scan_vault(vault, ["/**"], "tools")
+            self.assertEqual(sorted(all_tool_files), ["keep.md", "notes/secret1.md"])
+
+            globbed = _scan_vault(vault, ["/generated/*.json", "**/secret?.md"], "tools")
+            self.assertNotIn("tools/generated/config.json", globbed)
+            self.assertIn("tools/generated/deep/config.json", globbed)
+
+    def test_external_config_keeps_legacy_vault_root_base(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            (vault / "nested").mkdir(parents=True)
+            (vault / "sync.py").write_text("root", encoding="utf-8")
+            (vault / "nested/sync.py").write_text("nested", encoding="utf-8")
+            files = _scan_vault(vault, ["./sync.py"])
+            self.assertNotIn("sync.py", files)
+            self.assertIn("nested/sync.py", files)
+
+    def test_ignored_file_in_old_state_never_reenters_full_sync(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            tool_dir = vault / "ios"
+            tool_dir.mkdir(parents=True)
+            (tool_dir / "config.json").write_text("local config", encoding="utf-8")
+            state = Path(root) / "state.json"
+            state.write_text(json.dumps({"version": 1, "entries": {
+                "ios/config.json": {"localMtimeMs": 1, "localSize": 12, "remoteETag": "old"}
+            }}), encoding="utf-8")
+            remote = FakeRemote({})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(),
+                extra_patterns=["/**"], ignore_base_rel_path="ios", apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["planned"], 0)
+            self.assertEqual(remote.objects, {})
+            self.assertEqual((tool_dir / "config.json").read_text(encoding="utf-8"), "local config")
+
+    def test_state_inside_vault_is_protected_without_ignore_pattern(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            tool_dir = vault / "ios"
+            tool_dir.mkdir(parents=True)
+            state = tool_dir / "r2-sync-state.json"
+            state.write_text(json.dumps({"version": 1, "entries": {}}), encoding="utf-8")
+            remote = FakeRemote({})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(),
+                apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["planned"], 0)
+            self.assertEqual(remote.objects, {})
+
     def test_r2_list_all_parses_and_pages_s3_xml(self):
         client = R2Client("https://<account-id>.r2.cloudflarestorage.com", "<bucket-name>", "key", "secret")
         calls = []
@@ -313,6 +554,19 @@ class PullProbeTests(unittest.TestCase):
             self.assertIn(remote_key, remote.objects)
             self.assertEqual(cipher.decrypt_content(remote.objects[remote_key].data), b"from local")
             self.assertIn("local.md", load_state(Path(root) / "state.json"))
+
+    def test_full_sync_pulls_new_remote_file_with_payload(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"remote.md": RemoteObject(b"from remote", "remote", {})})
+
+            result = execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), apply=True, push=True)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["plannedByType"].get("PULL"), 1)
+            self.assertEqual((vault / "remote.md").read_bytes(), b"from remote")
+            self.assertIn("remote.md", load_state(state))
 
     def test_full_sync_applies_remote_and_local_deletes_only_when_allowed(self):
         with tempfile.TemporaryDirectory() as root:
