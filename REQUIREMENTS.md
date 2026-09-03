@@ -2,7 +2,7 @@
 
 ## 目的
 
-Obsidianが起動していない状態でも、VaultとCloudflare R2を同期できる独立CLIを提供する。デスクトップ版はNode.jsで双方向同期し、iOS版はiOSショートカットからa-ShellのPythonを起動して、Remotely Saveのファイル適用経路を避けたPULLを検証する。
+Obsidianが起動していない状態でも、VaultとCloudflare R2を同期できる独立CLIを提供する。デスクトップ版はNode.jsで双方向同期し、iOS版はiOSショートカットからa-ShellのPythonを起動して、Remotely Saveのファイル適用経路を避けた同期を検証する。
 
 ## プロジェクト運用
 
@@ -21,24 +21,24 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - デフォルトはdry-runとし、実行系・削除系には明示フラグを要求する
 - `npm test`で偽リモートと一時Vaultを使った同期判定・適用を検証できる
 
-## iOS初期版の要件
+## iOS版の要件
 
 ### 対象
 
 - 実行経路は iOSショートカット → a-Shell `In App` → Python
-- R2からiPhoneへのPULLのみ
+- R2とiPhone間のfull同期。PULL、明示許可されたPUSH／削除／mergeを含む
 - ローカルVaultとR2の双方を全走査する
 - 現行PC版とR2オブジェクト形式、暗号化、ファイル名規則、差分判定を互換にする
 - Vaultは利用者が指定するローカルファイル領域を対象にする。特定のVault名や個人環境を前提にしない
 - 現行の同期対象・除外設定を踏襲する
 
-### 初期版で行わないこと
+### iOSで明示許可が必要な操作
 
-- PUSH
-- リモート削除のローカル反映
-- 競合の自動マージ
+- PUSHは`--push`または設定の`allowPush: true`が必要
+- リモート／ローカル削除は`--allow-delete`または設定の`allowDelete: true`が必要
+- 3-way mergeは`--merge`または設定の`merge: true`が必要
 - iOSバックグラウンド実行の保証
-- 初回同期・全量再同期・添付ファイルの5秒保証
+- 全走査・全量取得に対する5秒保証
 
 ### 安全性
 
@@ -48,12 +48,12 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - R2のmtimeをローカルへ復元する
 - 競合が1件でもあれば、ファイル適用前に同期全体を中止する
 - 取得・書き込みの失敗時は既存ファイルを壊さない
-- 初回または状態消失時はDry Runで差分確認してから適用する
+- 初回または状態消失時はDry Runで差分確認してから適用する。両側に存在するファイルは内容一致ならSEED、不一致ならmtime判定またはmergeを行う
 - テストR2バケットと読み取り専用キーを使用し、本番データへ直接Probeしない
 
 ### 性能
 
-- 1〜2個、合計1MB以内の小さなMarkdownを基準にする
+- Probeは1〜2個の小さなMarkdown、full PULLは実Vaultのファイル数・サイズを別基準として測定する
 - T1はショートカット起動からVaultへの直接ファイル置換完了までとし、中央値5秒以内を目標にする
 - 同一条件を10回測定し、95パーセンタイル10秒以内を目安にする
 - Obsidianが外部変更を認識するまでのT2は別計測とする
@@ -73,9 +73,24 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 1. R2なしで直接ファイル置換とT1／T2計測
 2. テストR2から1ファイルを取得するProbe
-3. 全走査・状態管理・Dry Run・チェックポイントを追加
-4. 暗号化互換と失敗系を検証
-5. 複数ファイル、PUSH、削除、競合処理を必要性に応じて追加
+3. 全走査・状態管理・Dry Run・チェックポイントを追加（iOS full sync）
+4. 暗号化互換と失敗系を検証（継続）
+5. 複数ファイル、PUSH、削除、競合処理を必要性に応じて拡張
+
+### iOS full sync の初回実装範囲
+
+- `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
+- `mode: "full"` または `--full` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
+- R2取得・内容確認は最大2並列、Vault書き込みとR2変更は初期値1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
+- PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は明示許可時だけR2またはVaultへ反映する
+- 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定またはmerge設定に従う
+- stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う
+- リモート一覧から消えたオブジェクトは、削除許可がない場合は保持し、許可時だけローカル削除またはPUSHで処理する
+- PUSH・PULL・merge対象のローカル内容は変更直前に再検査し、競合が1件でもあれば変更を開始しない
+- 成功した操作ごとに、Vault外の状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする
+- `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
+- `--merge`はstateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
+- 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
 
 ## 関連
 

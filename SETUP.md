@@ -17,7 +17,7 @@ copy .env.example .env
 
 | 変数 | 説明 |
 |---|---|
-| `VAULT_PATH` | 同期するvaultの絶対パス（例: `C:\Users\you\Documents\MyVault`） |
+| `VAULT_PATH` | 同期するvaultの絶対パス（`<vault-path>`） |
 | `R2_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` 形式 |
 | `R2_BUCKET` | Remotely Save側の設定と同じバケット名 |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2のAPIトークン |
@@ -88,6 +88,27 @@ node dist/r2-sync.bundle.cjs --apply
 ```
 
 `.env` はプロジェクト直下（実行時のカレントディレクトリ）から読まれるので、`dist/r2-sync.bundle.cjs` をプロジェクト外に持ち出す場合は `.env` と `.sync-state.json` も同じディレクトリに置くこと。詳細は `DESIGN.md` の「単体実行用バンドル」参照。
+
+## iOS full sync
+
+iOS版は `ios/sync.py` を a-Shell の Documents 等へ配置し、設定JSONと状態JSONはVault外のiOSアプリ領域に置く。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。設定JSONの例は `DESIGN.md` を参照する。
+
+Shortcuts の「Run a-Shell script」または a-Shell In App から、次の形で実行する。
+
+```text
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --apply
+```
+
+開発環境でVaultとR2を現行同等に全実行する場合は、設定JSONに`"mode": "full"`を指定する。最初の実行はdry-runでVault走査、R2一覧、PULL/PUSH/delete/merge対象の検証だけを行い、結果JSONをShortcutsの通知で確認する。問題がなければ`--apply`を付ける。変更系操作は設定またはコマンドラインで明示的に許可する。
+
+```text
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full --push --allow-delete --merge
+python3 <ios-script-path>/sync.py --config <ios-app-data>/r2-sync-config.json --full --push --allow-delete --merge --apply
+```
+
+full syncは全走査・全列挙を行う。`--push`はローカル変更のR2反映、`--allow-delete`はremote/local削除、`--merge`はstateのbaseを使う3-way mergeを有効にする。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。実R2へ向ける前に、テストバケットと読み取り専用キーでPULLを検証し、PUSH/deleteの実行は専用のテストデータで確認する。
 
 ## 実行のたびに確認すること
 

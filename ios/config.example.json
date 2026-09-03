@@ -1,0 +1,15 @@
+{
+  "vaultPath": "<vault-path>",
+  "statePath": "<ios-app-data>/r2-sync-state.json",
+  "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+  "bucket": "<bucket-name>",
+  "accessKeyId": "<access-key-id>",
+  "secretAccessKey": "<secret-access-key>",
+  "password": "<sync-password>",
+  "mode": "full",
+  "allowPush": false,
+  "allowDelete": false,
+  "merge": false,
+  "remotePrefix": "",
+  "ignoreExtra": []
+}

@@ -165,7 +165,7 @@ iOS用Pythonは本リポジトリからa-ShellのDocuments等へデプロイし�
 ```text
 r2-sync/
 ├── src/                    # デスクトップNode.js版
-├── ios/                    # iOS用Python版（追加予定）
+├── ios/                    # iOS用Python版（a-Shell向け、full sync／Probe）
 ├── REQUIREMENTS.md         # プロジェクト要件
 └── DESIGN.md               # デスクトップ＋iOS設計
 
@@ -173,14 +173,56 @@ r2-sync/
 └── r2-sync.bundle.cjs      # 利用者が必要に応じて配置する生成物
 ```
 
+#### iOS PULL のファイル構成
+
+PULL実行ではVault内に設定・状態・ログを置かない。設定JSONと状態JSONはShortcutsまたはa-Shellが利用できるアプリ領域など、Vault外の利用者管理領域に置く。
+
+```text
+ios/
+├── sync.py                 # 標準ライブラリだけで動くiOS同期実行点
+└── test_sync.py            # R2を使わない安全性・暗号のテスト
+
+<ios-app-data>/
+├── r2-sync-config.json     # 実値は利用者が作成。リポジトリには含めない
+└── r2-sync-state.json      # 端末専用状態。Vault外に自動生成
+```
+
+設定JSONの例は次のようにプレースホルダーだけで記載する。アクセスキー、パスワード、実際のVaultパスはリポジトリへ保存しない。
+
+```json
+{
+  "vaultPath": "<vault-path>",
+  "statePath": "<ios-app-data>/r2-sync-state.json",
+  "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+  "bucket": "<bucket-name>",
+  "accessKeyId": "<access-key-id>",
+  "secretAccessKey": "<secret-access-key>",
+  "password": "<sync-password>",
+  "mode": "full",
+  "allowPush": false,
+  "allowDelete": false,
+  "merge": false,
+  "remotePrefix": "",
+  "ignoreExtra": []
+}
+```
+
+`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。`ignoreExtra`はデスクトップ版の追加除外パターンと同じ簡易形式である。`allowPush`、`allowDelete`、`merge`は変更系操作の許可設定で、CLIの`--push`、`--allow-delete`、`--merge`でも一時的に有効化できる。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。CLIの`--full`は設定のmodeより優先してfull同期を実行する。
+
+`sync.py`はGETとListObjectsV2の署名にAWS SigV4を使い、`rclone-base64`のscrypt／AES-EMEによるファイル名復号と、RCLONEヘッダー・24バイトnonce・64KiB単位のXSalsa20-Poly1305による内容復号を標準ライブラリで行う。ProbeのMarkdownはUTF-8として検証し、full PULLでは復号済みバイト列をそのまま検証済みデータとして扱う。検証済みバイト列だけを同一ディレクトリの一時ファイルへ書き、`os.replace`で置換する。mtimeは一時ファイルへ設定してから置換するため、既存ファイルは取得・復号・検証・一時書き込みの失敗で変更されない。
+
+適用前に全対象のローカル競合を検査する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。PUSHとmerge後のR2 PUT成功後にローカル置換が失敗するような異種システム間の中断は、次回のstate／ETag再検査で収束させる。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含め、Shortcutsの通知へ渡せるようにする。
+
 ### 初期実行経路
+
+full PULLの実行経路は次の通りである。既存のProbeモードは走査・一覧取得を明示ファイルへ置き換えるが、取得・検証・原子的適用・checkpointの境界は共通である。
 
 ```text
 iOS Shortcuts
   ↓
 a-Shell In App
   ↓
-ios/pull.py
+ios/sync.py
   ↓
 Vault全走査 + R2全列挙
   ↓
@@ -193,14 +235,16 @@ R2取得・復号 → 一時ファイル → 検証 → 原子的置換
 mtime復元 → 状態チェックポイント更新 → 通知・ログ
 ```
 
-初期版はPULL専用で、リモート削除は無視する。Obsidianは閉じるか編集停止状態で実行する。Shortcutsの初回だけVaultフォルダを選択し、以後はブックマークを使う。
+ProbeはPULL専用で、full同期では明示許可されたPUSH、remote/local削除、mergeを実行する。Obsidianは閉じるか編集停止状態で実行する。Shortcutsの初回だけVaultフォルダを選択し、以後はブックマークを使う。
 
 ### iOS版の差分・状態
 
-- ローカルVaultとR2の双方を全走査し、現行PC版の3-way比較をiOS側でも再現する
+- ローカルVaultとR2の双方を全走査し、PULLに必要な範囲で現行PC版の3-way比較を再現する
 - iOSの状態ファイルはVault外に置く。PC版のプロジェクトルートにある状態ファイルとは端末別に分離する
 - 状態形式は `{ localMtimeMs, localSize, remoteETag, localContentHash }` を基本にPC版と互換にする
-- 状態がない場合はDry Runを先に実行する
+- 状態がない場合は、両側に存在するファイルの内容一致を`SEED`、不一致を競合として扱い、Dry Runを先に実行する
+- リモート一覧から消えたオブジェクトは削除許可がなければ保持し、許可時はlocal変更の有無に応じてPUSHまたはDELETE_LOCALを計画する
+- stateへ`baseContentBase64`を保存し、`--merge`時の3-way mergeの共通祖先として利用する。旧stateにbaseがなければ自動mergeせず競合とする
 - 1ファイルの置換成功ごとに状態を一時ファイル経由で更新する
 - 状態更新に失敗した場合は同期を失敗扱いにし、次回に再確認する
 
@@ -234,7 +278,7 @@ t8  Obsidian外部変更認識
 
 ### 将来拡張
 
-R2一覧取得が支配的だった場合のみ、マニフェストまたは一覧キャッシュを検討する。ローカル適用が支配的だった場合は、書き込み並列度、Obsidianの外部変更検知、差分ZIP方式を個別に検証する。PUSH、削除、競合マージは、PULLの相互運用と中断復帰が安定してから追加する。
+R2一覧取得が支配的だった場合のみ、マニフェストまたは一覧キャッシュを検討する。ローカル適用が支配的だった場合は、書き込み並列度、Obsidianの外部変更検知、差分ZIP方式を個別に検証する。PUSH、削除、競合マージは、full syncの相互運用と中断復帰をテストR2で継続検証する。
 
 ## 関連
 
