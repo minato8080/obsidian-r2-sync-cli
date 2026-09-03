@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 try:
@@ -19,6 +21,7 @@ try:
         _config_relative_path,
         _ignore_base_rel_path,
         _ignore_matcher,
+        _report_result,
         _poly1305,
         _xsalsa_stream,
         _scan_vault,
@@ -39,6 +42,7 @@ except ImportError:
     _config_relative_path,
     _ignore_base_rel_path,
     _ignore_matcher,
+    _report_result,
     _poly1305,
     _xsalsa_stream,
     _scan_vault,
@@ -94,6 +98,102 @@ def encrypt_content_for_test(clear, cipher, nonce):
 
 
 class PullProbeTests(unittest.TestCase):
+    def test_full_sync_reports_node_style_plan_and_progress(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"note.md": RemoteObject(b"remote", "e1", {})})
+            messages = []
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, progress=messages.append,
+            )
+            _report_result(messages.append, result)
+            rendered = "\n".join(messages)
+
+            self.assertTrue(result["ok"], result)
+            self.assertIn("local files: 0件 / remote objects: 1件 / 前回状態: 0件", rendered)
+            self.assertIn("取得・検証中: 1/1", rendered)
+            self.assertIn("[PULL] 1件", rendered)
+            self.assertIn("  note.md", rendered)
+            self.assertIn("R2 snapshotを再確認しています...", rendered)
+            self.assertIn("適用中: 1/1", rendered)
+            self.assertIn("=== 実行結果 ===", rendered)
+            self.assertIn("PULL: 1", rendered)
+
+    def test_full_sync_does_not_apply_or_checkpoint_noops(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"note.md": RemoteObject(b"same", "e1", {})})
+            first = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+            self.assertTrue(first["ok"], first)
+            original_state = state.read_bytes()
+            list_remote = mock.Mock(side_effect=remote.list)
+            messages = []
+
+            result = execute_full_sync(
+                vault, state, list_remote, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, progress=messages.append,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["unchanged"], 1)
+            self.assertEqual(result["planned"], 0)
+            self.assertEqual(result["applied"], 0)
+            self.assertEqual(result["plannedByType"], {})
+            self.assertEqual(result["appliedByType"], {})
+            self.assertEqual(list_remote.call_count, 1)
+            self.assertEqual(state.read_bytes(), original_state)
+            rendered = "\n".join(messages)
+            self.assertIn("[NOOP] 1件", rendered)
+            self.assertIn("適用対象の変更はありません。", rendered)
+            self.assertNotIn("変更を適用しています", rendered)
+            self.assertNotIn("適用中:", rendered)
+
+    def test_main_keeps_json_on_stdout_and_progress_on_stderr(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            vault = root_path / "vault"
+            vault.mkdir()
+            config = root_path / "config.json"
+            config.write_text(json.dumps({
+                "vaultPath": str(vault),
+                "statePath": "state.json",
+                "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+                "bucket": "<bucket-name>",
+                "accessKeyId": "key",
+                "secretAccessKey": "secret",
+                "encryption": "plain",
+                "mode": "full",
+            }), encoding="utf-8")
+            remote = FakeRemote({})
+            client = mock.Mock(
+                list_all=remote.list,
+                get_object=remote.get,
+                put_object=remote.put,
+                delete_object=remote.delete,
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with mock.patch.object(pull_module, "R2Client", return_value=client):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = pull_module.main(["--config", str(config)])
+
+            output_lines = stdout.getvalue().splitlines()
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(output_lines), 1)
+            self.assertTrue(json.loads(output_lines[0])["ok"])
+            self.assertIn("vault:", stderr.getvalue())
+            self.assertIn("mode: DRY-RUN", stderr.getvalue())
+            self.assertIn("dry-runのため実際の変更は行っていません", stderr.getvalue())
+            self.assertIn("=== 実行結果 ===", stderr.getvalue())
+
     def test_local_deleted_remote_changed_pull_has_payload(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"

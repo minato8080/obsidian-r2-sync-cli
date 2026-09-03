@@ -54,13 +54,14 @@ async function runSync({ apply = true, allowDelete = false } = {}) {
   const prevEntries = await loadPrevState();
   const actions = await planSync({ vaultPath, localFiles, remoteItems, prevEntries, ignoreMatcher, cipher, r2Prefix, r2 });
   const result = await applyActions({ actions, vaultPath, localFiles, prevEntries, cipher, r2, r2Prefix, apply, allowDelete });
-  if (apply) await savePrevState(result.newEntries);
+  if (apply && actions.some(({ type }) => type !== "NOOP")) await savePrevState(result.newEntries);
   return { actions, ...result };
 }
 
 let stateHolder = {};
+let stateSaveCount = 0;
 async function loadPrevState() { return stateHolder; }
-async function savePrevState(entries) { stateHolder = entries; }
+async function savePrevState(entries) { stateHolder = entries; stateSaveCount++; }
 
 function summarizeActions(actions) {
   const m = {};
@@ -82,9 +83,20 @@ check("run1: PUSHが2件", summarizeActions(r1.actions).PUSH === 2);
 check("run1: remoteに2件アップロードされた", remoteStore.size === 2);
 
 // 2. 変化なし -> NOOP
-let r2run = await runSync();
+const stateSaveCountBeforeNoop = stateSaveCount;
+const noopLogs = [];
+const originalConsoleLog = console.log;
+console.log = (...parts) => noopLogs.push(parts.join(" "));
+let r2run;
+try {
+  r2run = await runSync();
+} finally {
+  console.log = originalConsoleLog;
+}
 check("run2: 全てNOOP", summarizeActions(r2run.actions).NOOP === 2);
 check("run2: remoteは変化なし(件数)", remoteStore.size === 2);
+check("run2: NOOPは適用進捗に含まれない", !noopLogs.some((line) => line.includes("適用")));
+check("run2: NOOPだけならstateを書き直さない", stateSaveCount === stateSaveCountBeforeNoop);
 
 // 3. リモート側でファイルが増える(別クライアントが追加した想定) -> PULL
 const encKey = await cipher.encryptPath("remote-only.md");

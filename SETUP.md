@@ -110,6 +110,8 @@ python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-co
 
 full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 
+実行中はNode版と同じ形式で、Vault・モード、走査件数、action別計画と対象パス、取得・検証／適用進捗、最終結果がa-Shellへ表示される。人向け進捗は標準エラー、Shortcutsが受け取る最終JSONは標準出力へ分離して出力される。
+
 ## 実行のたびに確認すること
 
 - 両側で変更されたファイルはコンフリクトコピーを作らず、mtimeが新しい方でそのまま上書きする（`reason`にその旨が出る）。上書きされた側の内容を戻したい場合はgit履歴から復元する。

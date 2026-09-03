@@ -93,7 +93,9 @@ async function main() {
     },
   });
 
-  await saveState(config.stateFilePath, newEntries);
+  if (actions.some(({ type }) => type !== "NOOP")) {
+    await saveState(config.stateFilePath, newEntries);
+  }
 
   console.log("\n=== 実行結果 ===");
   for (const [k, v] of Object.entries(summary)) console.log(`${k}: ${v}`);

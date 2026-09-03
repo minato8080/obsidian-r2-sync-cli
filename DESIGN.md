@@ -80,6 +80,7 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 - ローカルの「変化」判定: mtime(ms)またはsizeが前回と異なるか
 - リモートの「変化」判定: S3の ETag が前回と異なるか（`ListObjectsV2` の結果をそのまま使う。多くのノートは単純PUTなのでETag=MD5として信頼できる）
 - **両側変更時の方針**: PC側はgitで管理しながらの運用なので、コンフリクトコピー(`<name> (conflict ...)`)は作らない。本家Remotely Save同様、単純にmtimeが新しい方をそのまま勝たせて上書きする（ローカルmtime vs リモートの`Metadata.mtime`、`GetObjectCommand`のレスポンスから軽量に取得。どちらのmtimeも無ければリモート優先）。上書きされた側の変更を復元したい場合はgit履歴から戻す想定。
+- `NOOP`は変更なしとして集計するだけで、Node版・iOS版とも適用処理、checkpoint更新、適用進捗の対象から除外する
 - 処理後、実際に存在する状態を `.sync-state.json` に書き戻す
 
 ### 本家Remotely Save（Obsidianプラグイン）との共存と誤検知防止
@@ -212,7 +213,11 @@ ios/
 
 `sync.py`はGETとListObjectsV2の署名にAWS SigV4を使い、`rclone-base64`のscrypt／AES-EMEによるファイル名復号と、RCLONEヘッダー・24バイトnonce・64KiB単位のXSalsa20-Poly1305による内容復号を標準ライブラリで行う。ProbeのMarkdownはUTF-8として検証し、full PULLでは復号済みバイト列をそのまま検証済みデータとして扱う。検証済みバイト列だけを同一ディレクトリの一時ファイルへ書き、`os.replace`で置換する。mtimeは一時ファイルへ設定してから置換するため、既存ファイルは取得・復号・検証・一時書き込みの失敗で変更されない。
 
-適用前に全対象のローカル競合を検査し、R2一覧も再取得して最初の一覧snapshotと比較する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。mergeはローカルを原子的に置換してからR2へPUTするため、ローカル置換失敗時にremoteだけが更新されることはない。後続のR2 PUTが失敗した場合、stateは更新せず、次回に変更済みローカル内容を再計画する。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含め、Shortcutsの通知へ渡せるようにする。
+適用前に全対象のローカル競合を検査し、R2一覧も再取得して最初の一覧snapshotと比較する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。mergeはローカルを原子的に置換してからR2へPUTするため、ローカル置換失敗時にremoteだけが更新されることはない。後続のR2 PUTが失敗した場合、stateは更新せず、次回に変更済みローカル内容を再計画する。
+
+Node版と同じく、開始時にVaultとDRY-RUN/APPLYモード、走査後にlocal/remote/state件数、計画確定後にaction種別・件数・対象パス（最大50件）、処理中に取得・検証件数と適用件数、終了時にaction別集計・競合・エラーを表示する。人向け表示は標準エラーへ逐次flushし、機械処理用の最終JSONだけを標準出力へ1行で出す。これによりa-Shellでは進捗を確認でき、Shortcutsは従来どおり標準出力のJSONを受け取れる。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含める。
+
+差分判定で得た`NOOP`は`unchanged`として集計・表示するが、実行対象のactionリストから分離する。したがって`NOOP`はローカル再検証、remote snapshot再取得、state checkpoint、適用進捗の分母には入らず、全件`NOOP`なら走査と判定後に`planned=0`、`applied=0`で終了する。
 
 ### 初期実行経路
 

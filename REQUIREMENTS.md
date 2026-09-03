@@ -19,6 +19,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - VaultとR2を全走査し、独自の3-way比較でPUSH／PULL／NOOP／削除を判定する
 - `.sync-state.json`で本PJ自身の前回状態を管理する
 - デフォルトはdry-runとし、実行系・削除系には明示フラグを要求する
+- `NOOP`は変更なし件数として表示するだけで、適用処理・checkpoint更新・適用進捗には含めない
 - `npm test`で偽リモートと一時Vaultを使った同期判定・適用を検証できる
 
 ## iOS版の要件
@@ -89,6 +90,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - PUSH・PULL・merge対象のローカル内容を変更開始前に再検査し、R2一覧も再取得して当初のremote snapshotと比較する。競合が1件でもあれば変更を開始しない
 - 成功した操作ごとに、設定ファイル基準で指定した状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする。Vault内にある設定ファイル、状態ファイル、状態更新用一時ファイルは、Vault走査・R2一覧から強制除外して同期しない
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
+- Node版と同じく、Vault・実行モード、local/remote/state件数、action別の計画と対象パス、取得・検証／適用件数、最終集計、競合・エラーを実行中に表示する。Shortcuts向けJSONを壊さないよう、人向け進捗は標準エラーへ逐次出力し、最終JSONだけを標準出力へ出す
+- `NOOP`は変更なし件数として表示するだけで、適用計画・適用前再検証・checkpoint更新・適用進捗には含めない。全件`NOOP`の実行結果は`planned=0`かつ`applied=0`とする
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
 

@@ -169,6 +169,21 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
   const summary = {};
   const errors = [];
   const bump = (type) => { summary[type] = (summary[type] ?? 0) + 1; };
+  const noopActions = actions.filter(({ type }) => type === "NOOP");
+  const applicableActions = actions.filter(({ type }) => type !== "NOOP");
+
+  // NOOP entries must survive the final state rebuild, but they are not work:
+  // do not send them through workers, progress, or periodic checkpoints.
+  for (const { relPath } of noopActions) {
+    bump("NOOP");
+    const loc = localFiles.get(relPath);
+    newEntries[relPath] = {
+      localMtimeMs: loc.mtimeMs,
+      localSize: loc.size,
+      remoteETag: prevEntries[relPath].remoteETag,
+      localContentHash: prevEntries[relPath].localContentHash,
+    };
+  }
 
   let done = 0;
   let checkpointing = false;
@@ -190,17 +205,6 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
 
     try {
       switch (type) {
-        case "NOOP": {
-          bump("NOOP");
-          const loc = localFiles.get(relPath);
-          newEntries[relPath] = {
-            localMtimeMs: loc.mtimeMs,
-            localSize: loc.size,
-            remoteETag: prevEntries[relPath].remoteETag,
-            localContentHash: prevEntries[relPath].localContentHash,
-          };
-          break;
-        }
         case "FORGET": {
           bump("FORGET");
           break;
@@ -272,16 +276,16 @@ export async function applyActions({ actions, vaultPath, localFiles, prevEntries
     }
 
     done++;
-    if (done % 50 === 0 || done === actions.length) {
-      console.log(`  適用中: ${done}/${actions.length}`);
+    if (done % 50 === 0 || done === applicableActions.length) {
+      console.log(`  適用中: ${done}/${applicableActions.length}`);
     }
     await maybeCheckpoint();
   }
 
-  if (actions.length > 0) {
+  if (applicableActions.length > 0) {
     console.log(`変更を適用しています(並列${DEFAULT_CONCURRENCY}件)...`);
   }
-  await runPool(actions, DEFAULT_CONCURRENCY, processOne);
+  await runPool(applicableActions, DEFAULT_CONCURRENCY, processOne);
 
   return { newEntries, summary, errors };
 }
