@@ -85,6 +85,14 @@ await cipher.key(password, "");      // salt引数は常に空文字 → rclone-
 
 iOS版の定常実行では、Vault走査で得たmtime/sizeだけでローカル変更の有無を判定し、mtime/sizeが変わったファイルに限って内容ハッシュを確認する。rclone暗号化ファイル名のAES-EME処理は、AES鍵スケジュールとMixColumns用GF乗算表を再利用し、オブジェクトごとの同一計算を避ける。全体の`scan`時間は`scanLocal`、`listRemote`、`decodeRemote`にも分けて記録する。
 
+NOOPのパスは同期計画中に絶対パスへ解決せず、ファイル内容の読取りまたは適用が必要な分岐で初めて`_vault_path`を呼ぶ。適用時間はR2 PUT/DELETEの`applyRemote`とstate永続化の`applyCheckpoint`へ分け、適用前R2再一覧・snapshot比較は`snapshotCheck`として記録する。
+
+SEEDはVault/R2を変更しないため、entryをメモリ上で更新し、次の変更操作のcheckpointまたはループ終了時にまとめてstateへ保存する。PUSH・PULL・DELETE・mergeは従来どおり成功直後にcheckpointし、中断復帰の境界を変えない。
+
+`textMergeBaseMaxBytes`を指定した場合、`baseContentBase64`はUTF-8として復号可能で上限以下の内容にだけ保存する。既存stateの対象外baseも、成功したapply実行時に一度だけ除去する。baseがないファイルの両側変更は安全側に倒して競合とし、自動mergeまたはmtime上書きを行わない。未指定時はstate互換のため制限しない。推奨初期値は1MiB (`1048576`) とする。
+
+`recheckRemoteBeforeApply`は既定`true`で、最初の変更直前にR2を再一覧して計画時snapshotと比較する。手動実行で外部更新が発生しないことを利用者が保証できる場合のみ`false`を指定できる。この場合は再一覧を省略するが、stderrへ警告し、結果JSONの`remoteSnapshotRechecked`を`false`にする。
+
 ### 本家Remotely Save（Obsidianプラグイン）との共存と誤検知防止
 
 本スクリプトの`.sync-state.json`は自分専用の前回状態であり、Obsidian本体のRemotely SaveがPUSH/PULLしても更新されない。そのため本家プラグインとこのCLIを交互に使うと、以下の理由で「実際には中身が変わっていないのに変化ありと誤検知」しやすい:

@@ -61,6 +61,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - PC版の並列数8は変更しない
 - 定常時の全件NOOP判定ではファイル内容を再読込せず、走査で取得したmtime/sizeを前回stateと比較する
 - `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`を個別に返す
+- NOOPパスは実際にファイルへアクセスする分岐まで絶対パス解決を遅延し、定常時の差分判定でファイルシステムへ再アクセスしない
+- `timingsMs`は適用前R2再確認の`snapshotCheck`、R2変更の`applyRemote`、state保存の`applyCheckpoint`も個別に返す
 
 ## 受入基準
 
@@ -94,6 +96,9 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
 - Node版と同じく、Vault・実行モード、local/remote/state件数、action別の計画と対象パス、取得・検証／適用件数、最終集計、競合・エラーを実行中に表示する。Shortcuts向けJSONを壊さないよう、人向け進捗は標準エラーへ逐次出力し、最終JSONだけを標準出力へ出す
 - `NOOP`は変更なし件数として表示するだけで、適用計画・適用前再検証・checkpoint更新・適用進捗には含めない。全件`NOOP`の実行結果は`planned=0`かつ`applied=0`とする
+- `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSH・PULL・削除・mergeは成功ごとのcheckpointを維持する
+- `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する
+- `recheckRemoteBeforeApply`は真偽値とし、既定値は`true`とする。明示的に`false`を指定した場合だけ適用直前のR2再一覧を省略し、警告と結果JSONのフラグで安全確認を省略したことを示す
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
 

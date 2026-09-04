@@ -63,7 +63,10 @@ def _report_result(progress, result: dict) -> None:
         _emit_progress(progress, "\ndry-runのため実際の変更は行っていません。--apply を付けて実行してください。")
     _emit_progress(progress, "\n=== 実行結果 ===")
     _emit_progress(progress, f"ok: {'true' if result.get('ok') else 'false'}")
-    for name in ("planned", "unchanged", "validated", "applied", "seeded", "ignoredRemoteDeletes"):
+    for name in (
+        "planned", "unchanged", "validated", "applied", "seeded", "ignoredRemoteDeletes",
+        "mergeBasesPruned", "mergeBasesPendingPrune",
+    ):
         if name in result:
             _emit_progress(progress, f"{name}: {result[name]}")
     for action_type, count in result.get("appliedByType", {}).items():
@@ -1039,10 +1042,41 @@ def _state_base_bytes(previous: dict | None) -> bytes | None:
         return None
 
 
-def _with_base(entry: dict, data: bytes) -> dict:
+def _eligible_text_merge_base(data: bytes, max_bytes: int) -> bool:
+    if len(data) > max_bytes:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _with_base(entry: dict, data: bytes, text_merge_base_max_bytes: int | None = None) -> dict:
     result = dict(entry)
-    result["baseContentBase64"] = base64.b64encode(data).decode("ascii")
+    if text_merge_base_max_bytes is None or _eligible_text_merge_base(data, text_merge_base_max_bytes):
+        result["baseContentBase64"] = base64.b64encode(data).decode("ascii")
+    else:
+        result.pop("baseContentBase64", None)
     return result
+
+
+def _prune_merge_bases(entries: dict, max_bytes: int | None) -> tuple[dict, int]:
+    if max_bytes is None:
+        return entries, 0
+    result = dict(entries)
+    pruned = 0
+    for path_name, raw_entry in entries.items():
+        if not isinstance(raw_entry, dict) or "baseContentBase64" not in raw_entry:
+            continue
+        base = _state_base_bytes(raw_entry)
+        if base is not None and _eligible_text_merge_base(base, max_bytes):
+            continue
+        entry = dict(raw_entry)
+        entry.pop("baseContentBase64", None)
+        result[path_name] = entry
+        pruned += 1
+    return result, pruned
 
 
 def _diff_hunks(base_lines: list[str], variant_lines: list[str]) -> list[dict]:
@@ -1360,6 +1394,8 @@ def execute_full_sync(
     merge: bool = False,
     ignore_base_rel_path: str = "",
     extra_protected_paths: list[str] | None = None,
+    text_merge_base_max_bytes: int | None = None,
+    recheck_remote_before_apply: bool = True,
     progress=None,
 ) -> dict:
     """Run the opt-in full bidirectional sync path.
@@ -1374,7 +1410,9 @@ def execute_full_sync(
     state_rel_path = _state_rel_path(vault, state_file)
     protected_paths = [state_rel_path] if state_rel_path else []
     protected_paths.extend(extra_protected_paths or [])
-    previous = load_state(state_file)
+    previous, merge_bases_to_prune = _prune_merge_bases(
+        load_state(state_file), text_merge_base_max_bytes
+    )
     _emit_progress(progress, "VaultとR2を走査しています...")
     scan_local_started = time.perf_counter()
     local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
@@ -1421,7 +1459,6 @@ def execute_full_sync(
         actions.append({"type": "PULL", "path": rel_path, "remote": remote, "hadLocal": had_local, "reason": reason})
 
     for rel_path in all_paths:
-        target = _vault_path(vault, rel_path)
         # `target` may exist on disk while the scanner intentionally omitted it
         # because it matches ignoreExtra.  Only the scanner result is a valid
         # local sync candidate.
@@ -1430,9 +1467,9 @@ def execute_full_sync(
         prev = active_previous.get(rel_path)
         if not prev:
             if has_local and remote:
-                candidates.append({"type": "BOOTSTRAP", "path": rel_path, "remote": remote, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
+                candidates.append({"type": "BOOTSTRAP", "path": rel_path, "remote": remote, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
             elif has_local:
-                actions.append({"type": "PUSH", "path": rel_path, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
+                actions.append({"type": "PUSH", "path": rel_path, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
             elif remote:
                 candidates.append({"type": "NEW_REMOTE", "path": rel_path, "remote": remote})
             continue
@@ -1450,19 +1487,19 @@ def execute_full_sync(
                 actions.append({"type": "DELETE_REMOTE", "path": rel_path, "remote": remote})
         elif not loc_gone and rem_gone:
             if local_is_changed:
-                actions.append({"type": "PUSH", "path": rel_path, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
+                actions.append({"type": "PUSH", "path": rel_path, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
             else:
-                actions.append({"type": "DELETE_LOCAL", "path": rel_path, "localSnapshotHash": hashlib.sha256(target.read_bytes()).hexdigest()})
+                actions.append({"type": "DELETE_LOCAL", "path": rel_path, "localSnapshotHash": hashlib.sha256(_vault_path(vault, rel_path).read_bytes()).hexdigest()})
         elif local_is_changed and remote_is_changed:
-            candidates.append({"type": "BOTH_CHANGED", "path": rel_path, "remote": remote, "prev": prev, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
+            candidates.append({"type": "BOTH_CHANGED", "path": rel_path, "remote": remote, "prev": prev, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
         elif local_is_changed:
-            local_bytes = target.read_bytes()
+            local_bytes = _vault_path(vault, rel_path).read_bytes()
             if prev.get("localContentHash") and hashlib.sha256(local_bytes).hexdigest() == prev["localContentHash"]:
                 actions.append({"type": "SEED", "path": rel_path, "remote": remote, "localBytes": local_bytes, "reason": "mtime変化のみ・内容一致のため転送スキップ"})
             else:
                 actions.append({"type": "PUSH", "path": rel_path, "localBytes": local_bytes, "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
         elif remote_is_changed:
-            candidates.append({"type": "REMOTE_CHANGED", "path": rel_path, "remote": remote, "localBytes": target.read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
+            candidates.append({"type": "REMOTE_CHANGED", "path": rel_path, "remote": remote, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
         else:
             actions.append({"type": "NOOP", "path": rel_path})
 
@@ -1541,13 +1578,50 @@ def execute_full_sync(
         "mode": "apply" if apply else "dry-run", "unchanged": unchanged,
         "scannedLocal": len(local), "scannedRemote": len(listed), "planned": len(applicable_actions), "validated": prepared_count,
         "applied": 0, "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
+        "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
+        "remoteSnapshotRechecked": False,
+        "mergeBasesPruned": 0, "mergeBasesPendingPrune": merge_bases_to_prune,
         "plannedByType": counts, "appliedByType": {}, "skippedByType": {},
         "timingsMs": {
             "scan": scan_ms, "scanLocal": scan_local_ms, "listRemote": list_remote_ms,
             "decodeRemote": decode_remote_ms, "conflictCheck": conflict_check_ms,
-            "fetchValidate": fetch_validate_ms, "apply": 0,
+            "fetchValidate": fetch_validate_ms, "snapshotCheck": 0, "apply": 0,
+            "applyRemote": 0, "applyCheckpoint": 0,
         },
     }
+
+    entries = dict(previous)
+    apply_remote_seconds = 0.0
+    apply_checkpoint_seconds = 0.0
+    state_dirty = merge_bases_to_prune > 0
+
+    def mark_merge_bases_pruned() -> None:
+        result["mergeBasesPruned"] += result["mergeBasesPendingPrune"]
+        result["mergeBasesPendingPrune"] = 0
+
+    def persist_entries() -> None:
+        nonlocal apply_checkpoint_seconds, state_dirty
+        checkpoint_started = time.perf_counter()
+        try:
+            save_state(state_file, entries)
+        finally:
+            apply_checkpoint_seconds += time.perf_counter() - checkpoint_started
+        state_dirty = False
+        mark_merge_bases_pruned()
+
+    def timed_remote(call, *args):
+        nonlocal apply_remote_seconds
+        remote_started = time.perf_counter()
+        try:
+            return call(*args)
+        finally:
+            apply_remote_seconds += time.perf_counter() - remote_started
+
+    def finish_apply_timing(apply_started: float) -> None:
+        result["timingsMs"]["apply"] = round((time.perf_counter() - apply_started) * 1000, 2)
+        result["timingsMs"]["applyRemote"] = round(apply_remote_seconds * 1000, 2)
+        result["timingsMs"]["applyCheckpoint"] = round(apply_checkpoint_seconds * 1000, 2)
+
     if conflicts or errors or not apply:
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
@@ -1579,41 +1653,60 @@ def execute_full_sync(
 
     if not applicable_actions:
         _emit_progress(progress, "適用対象の変更はありません。")
+        if state_dirty:
+            apply_started = time.perf_counter()
+            try:
+                persist_entries()
+            except Exception as error:
+                result["ok"] = False
+                result["errors"].append({"path": "<state>", "error": str(error)})
+            finish_apply_timing(apply_started)
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
     # A second full listing closes the fetch/validation window.  Any change in
     # the remote snapshot aborts the whole batch before its first mutation.
-    _emit_progress(progress, "R2 snapshotを再確認しています...")
-    try:
-        latest_listed = list_remote(remote_prefix)
-        latest_remotes, _, latest_conflicts = _collect_remote_objects(
-            latest_listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
-        )
-        result["conflicts"].extend(latest_conflicts)
-        snapshot_paths = sorted(set(remotes) | set(latest_remotes))
-        for path_name in snapshot_paths:
-            before = remotes.get(path_name)
-            after = latest_remotes.get(path_name)
-            before_identity = None if before is None else (before.get("key"), before.get("etag"), before.get("size"), before.get("lastModified"))
-            after_identity = None if after is None else (after.get("key"), after.get("etag"), after.get("size"), after.get("lastModified"))
-            if before_identity != after_identity:
-                result["conflicts"].append({"path": path_name, "reason": "remote object changed during planning"})
-    except Exception as error:
-        result["errors"].append({"path": "<remote-list>", "error": str(error)})
+    if recheck_remote_before_apply:
+        _emit_progress(progress, "R2 snapshotを再確認しています...")
+        snapshot_started = time.perf_counter()
+        try:
+            latest_listed = list_remote(remote_prefix)
+            latest_remotes, _, latest_conflicts = _collect_remote_objects(
+                latest_listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
+            )
+            result["conflicts"].extend(latest_conflicts)
+            snapshot_paths = sorted(set(remotes) | set(latest_remotes))
+            for path_name in snapshot_paths:
+                before = remotes.get(path_name)
+                after = latest_remotes.get(path_name)
+                before_identity = None if before is None else (before.get("key"), before.get("etag"), before.get("size"), before.get("lastModified"))
+                after_identity = None if after is None else (after.get("key"), after.get("etag"), after.get("size"), after.get("lastModified"))
+                if before_identity != after_identity:
+                    result["conflicts"].append({"path": path_name, "reason": "remote object changed during planning"})
+            result["remoteSnapshotRechecked"] = True
+        except Exception as error:
+            result["errors"].append({"path": "<remote-list>", "error": str(error)})
+        finally:
+            result["timingsMs"]["snapshotCheck"] = round((time.perf_counter() - snapshot_started) * 1000, 2)
+    else:
+        _emit_progress(progress, "警告: 適用前のR2 snapshot再確認をスキップします。")
     if result["conflicts"] or result["errors"]:
         result["ok"] = False
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
-    entries = dict(previous)
     apply_started = time.perf_counter()
     _emit_progress(progress, "変更を適用しています(並列1件)...")
 
-    def checkpoint(path_name: str, etag: str | None, data: bytes) -> None:
+    def checkpoint(path_name: str, etag: str | None, data: bytes, persist: bool = True) -> None:
+        nonlocal state_dirty
         target = _vault_path(vault, path_name)
-        entries[path_name] = _with_base(_entry_from_stat(target.stat(), etag, data), data)
-        save_state(state_file, entries)
+        entries[path_name] = _with_base(
+            _entry_from_stat(target.stat(), etag, data), data, text_merge_base_max_bytes
+        )
+        state_dirty = True
+        if persist:
+            persist_entries()
 
     def bump(mapping: dict, action_type: str) -> None:
         mapping[action_type] = mapping.get(action_type, 0) + 1
@@ -1624,13 +1717,18 @@ def execute_full_sync(
         try:
             action_type = action["type"]
             if action_type == "SEED":
-                checkpoint(path_name, action["remote"].get("etag"), action["localBytes"])
+                checkpoint(path_name, action["remote"].get("etag"), action["localBytes"], persist=False)
                 bump(result["appliedByType"], action_type)
             elif action_type == "PUSH":
                 if not push:
                     bump(result["skippedByType"], action_type)
                     continue
-                etag = put(action["remote"]["key"] if action.get("remote") else _remote_key(decoder, remote_prefix, path_name), decoder.encrypt_content(action["localBytes"]), action["localMtimeMs"])
+                etag = timed_remote(
+                    put,
+                    action["remote"]["key"] if action.get("remote") else _remote_key(decoder, remote_prefix, path_name),
+                    decoder.encrypt_content(action["localBytes"]),
+                    action["localMtimeMs"],
+                )
                 checkpoint(path_name, etag, action["localBytes"])
                 result["applied"] += 1
                 bump(result["appliedByType"], action_type)
@@ -1641,15 +1739,18 @@ def execute_full_sync(
                 bump(result["appliedByType"], action_type)
             elif action_type == "MERGE":
                 atomic_replace(target, action["data"], action["localMtimeMs"])
-                etag = put(action["remote"]["key"], decoder.encrypt_content(action["data"]), action["localMtimeMs"])
+                etag = timed_remote(
+                    put, action["remote"]["key"], decoder.encrypt_content(action["data"]), action["localMtimeMs"]
+                )
                 checkpoint(path_name, etag, action["data"])
                 result["applied"] += 1
                 bump(result["appliedByType"], action_type)
             elif action_type == "DELETE_REMOTE":
                 if allow_delete:
-                    remove(action["remote"]["key"])
+                    timed_remote(remove, action["remote"]["key"])
                     entries.pop(path_name, None)
-                    save_state(state_file, entries)
+                    state_dirty = True
+                    persist_entries()
                     result["applied"] += 1
                     bump(result["appliedByType"], action_type)
                 else:
@@ -1658,14 +1759,16 @@ def execute_full_sync(
                 if allow_delete:
                     target.unlink()
                     entries.pop(path_name, None)
-                    save_state(state_file, entries)
+                    state_dirty = True
+                    persist_entries()
                     result["applied"] += 1
                     bump(result["appliedByType"], action_type)
                 else:
                     bump(result["skippedByType"], action_type)
             elif action_type == "FORGET":
                 entries.pop(path_name, None)
-                save_state(state_file, entries)
+                state_dirty = True
+                persist_entries()
                 bump(result["appliedByType"], action_type)
         except Exception as error:
             result["ok"] = False
@@ -1674,7 +1777,13 @@ def execute_full_sync(
             break
         if index % 50 == 0 or index == len(applicable_actions):
             _emit_progress(progress, f"  適用中: {index}/{len(applicable_actions)}")
-    result["timingsMs"]["apply"] = round((time.perf_counter() - apply_started) * 1000, 2)
+    if state_dirty and not result["errors"]:
+        try:
+            persist_entries()
+        except Exception as error:
+            result["ok"] = False
+            result["errors"].append({"path": "<state>", "error": str(error)})
+    finish_apply_timing(apply_started)
     result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
     return result
 
@@ -1729,6 +1838,11 @@ def _load_config(path: Path) -> dict:
         not isinstance(config["ignoreExtra"], list) or not all(isinstance(item, str) for item in config["ignoreExtra"])
     ):
         raise PullError("ignoreExtra must be an array of strings")
+    max_base_bytes = config.get("textMergeBaseMaxBytes")
+    if max_base_bytes is not None and (isinstance(max_base_bytes, bool) or not isinstance(max_base_bytes, int) or max_base_bytes < 0):
+        raise PullError("textMergeBaseMaxBytes must be a non-negative integer")
+    if "recheckRemoteBeforeApply" in config and not isinstance(config["recheckRemoteBeforeApply"], bool):
+        raise PullError("recheckRemoteBeforeApply must be true or false")
     return config
 
 
@@ -1765,7 +1879,10 @@ def main(argv: list[str] | None = None) -> int:
                 config["vaultPath"], state_path, r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
                 remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
                 push=True, allow_delete=args.allow_delete, merge=True, ignore_base_rel_path=ignore_base_rel_path,
-                extra_protected_paths=extra_protected_paths, progress=progress,
+                extra_protected_paths=extra_protected_paths,
+                text_merge_base_max_bytes=config.get("textMergeBaseMaxBytes"),
+                recheck_remote_before_apply=config.get("recheckRemoteBeforeApply", True),
+                progress=progress,
             )
         else:
             files = config["files"]

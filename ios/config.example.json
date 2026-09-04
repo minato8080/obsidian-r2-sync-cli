@@ -8,6 +8,8 @@
   "password": "<sync-password>",
   "mode": "full",
   "remotePrefix": "",
+  "textMergeBaseMaxBytes": 1048576,
+  "recheckRemoteBeforeApply": true,
   "ignoreExtra": [
     "/**"
   ]

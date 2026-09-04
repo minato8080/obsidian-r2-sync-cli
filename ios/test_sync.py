@@ -121,6 +121,11 @@ class PullProbeTests(unittest.TestCase):
             self.assertIn("適用中: 1/1", rendered)
             self.assertIn("=== 実行結果 ===", rendered)
             self.assertIn("PULL: 1", rendered)
+            self.assertIn("snapshotCheck", result["timingsMs"])
+            self.assertIn("applyRemote", result["timingsMs"])
+            self.assertIn("applyCheckpoint", result["timingsMs"])
+            self.assertTrue(result["remoteSnapshotRecheckEnabled"])
+            self.assertTrue(result["remoteSnapshotRechecked"])
 
     def test_full_sync_does_not_apply_or_checkpoint_noops(self):
         with tempfile.TemporaryDirectory() as root:
@@ -137,10 +142,11 @@ class PullProbeTests(unittest.TestCase):
             messages = []
 
             with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("NOOP content was read")):
-                result = execute_full_sync(
-                    vault, state, list_remote, remote.get, remote.put, remote.delete,
-                    PlainContent(), apply=True, push=True, progress=messages.append,
-                )
+                with mock.patch.object(pull_module, "_vault_path", side_effect=AssertionError("NOOP path was resolved")):
+                    result = execute_full_sync(
+                        vault, state, list_remote, remote.get, remote.put, remote.delete,
+                        PlainContent(), apply=True, push=True, progress=messages.append,
+                    )
 
             self.assertTrue(result["ok"], result)
             self.assertEqual(result["unchanged"], 1)
@@ -159,6 +165,106 @@ class PullProbeTests(unittest.TestCase):
             self.assertNotIn("変更を適用しています", rendered)
             self.assertNotIn("適用中:", rendered)
 
+    def test_full_sync_batches_seed_only_state_checkpoint(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "one.txt").write_bytes(b"one")
+            (vault / "two.json").write_bytes(b"two")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({
+                "one.txt": RemoteObject(b"one", "e1", {}),
+                "two.json": RemoteObject(b"two", "e2", {}),
+            })
+
+            with mock.patch.object(pull_module, "save_state", wraps=pull_module.save_state) as save:
+                result = execute_full_sync(
+                    vault, state, remote.list, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True,
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"SEED": 2})
+            self.assertEqual(result["applied"], 0)
+            self.assertEqual(save.call_count, 1)
+            self.assertGreaterEqual(result["timingsMs"]["applyCheckpoint"], 0)
+
+    def test_full_sync_prunes_large_and_binary_merge_bases_when_enabled(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            remote = FakeRemote({
+                "small.txt": RemoteObject(b"ok", "small", {}),
+                "large.txt": RemoteObject(b"12345", "large", {}),
+                "image.bin": RemoteObject(b"\xff\x00", "binary", {}),
+            })
+            first = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+            self.assertTrue(first["ok"], first)
+            original_state = state.read_bytes()
+            original_size = state.stat().st_size
+
+            dry_run = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=False, push=True, text_merge_base_max_bytes=4,
+            )
+            self.assertTrue(dry_run["ok"], dry_run)
+            self.assertEqual(dry_run["mergeBasesPruned"], 0)
+            self.assertEqual(dry_run["mergeBasesPendingPrune"], 2)
+            self.assertEqual(state.read_bytes(), original_state)
+
+            with mock.patch.object(pull_module, "save_state", wraps=pull_module.save_state) as save:
+                second = execute_full_sync(
+                    vault, state, remote.list, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True, text_merge_base_max_bytes=4,
+                )
+
+            self.assertTrue(second["ok"], second)
+            self.assertEqual(second["planned"], 0)
+            self.assertEqual(second["mergeBasesPruned"], 2)
+            self.assertEqual(second["mergeBasesPendingPrune"], 0)
+            self.assertEqual(save.call_count, 1)
+            self.assertLess(state.stat().st_size, original_size)
+            entries = load_state(state)
+            self.assertIn("baseContentBase64", entries["small.txt"])
+            self.assertNotIn("baseContentBase64", entries["large.txt"])
+            self.assertNotIn("baseContentBase64", entries["image.bin"])
+
+            (vault / "large.txt").write_bytes(b"local-change")
+            remote.objects["large.txt"] = RemoteObject(b"remote-change", "large-new", {})
+            conflict = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, merge=True, text_merge_base_max_bytes=4,
+            )
+            self.assertFalse(conflict["ok"], conflict)
+            self.assertEqual(conflict["applied"], 0)
+            self.assertTrue(any("merge base is unavailable" in item["reason"] for item in conflict["conflicts"]))
+            self.assertEqual((vault / "large.txt").read_bytes(), b"local-change")
+            self.assertEqual(remote.objects["large.txt"].data, b"remote-change")
+
+    def test_full_sync_can_explicitly_skip_remote_snapshot_recheck(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"note.txt": RemoteObject(b"remote", "e1", {})})
+            list_remote = mock.Mock(side_effect=remote.list)
+            messages = []
+
+            result = execute_full_sync(
+                vault, state, list_remote, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, recheck_remote_before_apply=False,
+                progress=messages.append,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(list_remote.call_count, 1)
+            self.assertFalse(result["remoteSnapshotRecheckEnabled"])
+            self.assertFalse(result["remoteSnapshotRechecked"])
+            self.assertEqual(result["timingsMs"]["snapshotCheck"], 0)
+            self.assertIn("snapshot再確認をスキップ", "\n".join(messages))
+
     def test_main_keeps_json_on_stdout_and_progress_on_stderr(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
@@ -174,6 +280,8 @@ class PullProbeTests(unittest.TestCase):
                 "secretAccessKey": "secret",
                 "encryption": "plain",
                 "mode": "full",
+                "textMergeBaseMaxBytes": 4,
+                "recheckRemoteBeforeApply": False,
             }), encoding="utf-8")
             remote = FakeRemote({})
             client = mock.Mock(
@@ -192,11 +300,34 @@ class PullProbeTests(unittest.TestCase):
             output_lines = stdout.getvalue().splitlines()
             self.assertEqual(exit_code, 0)
             self.assertEqual(len(output_lines), 1)
-            self.assertTrue(json.loads(output_lines[0])["ok"])
+            payload = json.loads(output_lines[0])
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["remoteSnapshotRecheckEnabled"])
             self.assertIn("vault:", stderr.getvalue())
             self.assertIn("mode: DRY-RUN", stderr.getvalue())
             self.assertIn("dry-runのため実際の変更は行っていません", stderr.getvalue())
             self.assertIn("=== 実行結果 ===", stderr.getvalue())
+
+    def test_config_rejects_unsafe_performance_option_types(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / "config.json"
+            base = {
+                "vaultPath": str(Path(root) / "vault"),
+                "statePath": "state.json",
+                "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+                "bucket": "<bucket-name>",
+                "accessKeyId": "key",
+                "secretAccessKey": "secret",
+                "mode": "full",
+            }
+            for field, value in (
+                ("textMergeBaseMaxBytes", -1),
+                ("textMergeBaseMaxBytes", True),
+                ("recheckRemoteBeforeApply", "false"),
+            ):
+                config.write_text(json.dumps({**base, field: value}), encoding="utf-8")
+                with self.assertRaises(Exception):
+                    pull_module._load_config(config)
 
     def test_local_deleted_remote_changed_pull_has_payload(self):
         with tempfile.TemporaryDirectory() as root:
