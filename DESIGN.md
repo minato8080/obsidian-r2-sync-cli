@@ -129,7 +129,7 @@ Node版の`.env`と同期state、iOS版の設定JSON・同期state・state更新
 
 Node版の`IGNORE_EXTRA`は、設定ファイルのあるディレクトリを基準にしたGitignore風globとして解釈する。先頭`/`を付けると基準ディレクトリ直下に固定し、`foo/bar`のようにスラッシュを含むパターンも基準ディレクトリからの相対パスになる。`sync.py`のようにスラッシュを含まないパターンは基準ディレクトリ以下の全階層に一致する。末尾`/`はディレクトリと配下、`*`と`?`は`/`をまたがず、`**`は複数階層をまたぐ。`./path`は旧設定互換で`/path`と同じ扱いにする。
 
-Python版の`ignoreExtra`はRemotely Saveの「Regex of Path to Ignore」に倣い、Vaultルートからの相対パスへ適用する正規表現の配列として解釈する。対象パスの区切りはOSにかかわらず`/`とし、正規表現は部分一致で評価する。Vault直下へ固定する場合は`^`、パス末尾へ固定する場合は`$`を使う。例えば`^r2-sync-tools(?:/|$)`はVault直下のツールディレクトリ全体、`(^|/)\\.env$`は全階層の`.env`を除外する。ディレクトリ名への一致は走査を打ち切り、その配下を除外する。ローカル走査、復号後のR2一覧、旧stateのフィルタへ同じmatcherを適用する。依存パッケージなしの要件を維持するためPython標準`re`を使用し、XRegExp固有拡張は対象外とする。
+Python版の`ignoreExtra`はVaultルートからの相対パスへ適用するGitignore風globの配列として解釈する。対象パスの区切りはOSにかかわらず`/`とする。`*`と`?`は`/`をまたがず、`**`は複数階層をまたぐ。スラッシュを含むパターンはVaultルート基準、スラッシュを含まないパターンは全階層の同名要素に一致する。末尾`/`はディレクトリと配下を表し、`foo/bar/**`は`foo/bar`ディレクトリ自体も含めて除外する。ディレクトリへの一致は走査を打ち切る。ローカル走査、復号後のR2一覧、旧stateのフィルタへ同じmatcherを適用する。
 
 - **`_remotely-save-metadata-on-remote.json` / `.bin`（レガシーファイル）を個別にハードコード除外する必要はない**: このファイル名はリモート上では暗号化されない生のファイル名で保存されるため、`planSync`が`cipher.decryptPath()`を試みた時点で復号エラーになり、既存の`try/catch`で自動的にスキップされる（`src/sync.js`）。ローカルに同名ファイルが実在する可能性はほぼ無視できるため、特別扱いは不要。
 - **上記の自動保護対象以外で接続情報が絡むファイル(`.obsidian/plugins/remotely-save/data.json`等)や秘匿フォルダ(`private/`等)を同期対象から外したい場合は、`IGNORE_EXTRA`に明示的に追加すること**。指定しないファイルは同期されるため、資格情報が絡むファイルを同期に含めたくない場合は必ず設定する。
@@ -220,13 +220,13 @@ ios/
   "mode": "full",
   "remotePrefix": "",
   "ignoreExtra": [
-    "^r2-sync-tools(?:/|$)",
-    "(^|/)\\.env$"
+    "r2-sync-tools/**",
+    "**/.env"
   ]
 }
 ```
 
-`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。fullの`--apply`はPUSH／PULL／自動mergeを実行し、削除だけは`--allow-delete`を追加指定した場合に実行する。`ignoreExtra`はVaultルート基準の正規表現配列である。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。
+`mode`は`full`または`probe`を指定する。fullではVaultを再帰走査し、`remotePrefix`配下をR2 ListObjectsV2で全列挙する。fullの`--apply`はPUSH／PULL／自動mergeを実行し、削除だけは`--allow-delete`を追加指定した場合に実行する。`ignoreExtra`はVaultルート基準のGitignore風glob配列である。`mode`を省略した既存設定はProbe互換のため`files`に明示した1〜2ファイルを対象にする。Probeでは`files[].key`を指定でき、省略時は`remotePrefix + rclone-base64で暗号化した相対パス`を使用する。
 
 `sync.py`はGETとListObjectsV2の署名にAWS SigV4を使い、`rclone-base64`のscrypt／AES-EMEによるファイル名復号と、RCLONEヘッダー・24バイトnonce・64KiB単位のXSalsa20-Poly1305による内容復号を標準ライブラリで行う。ProbeのMarkdownはUTF-8として検証し、full PULLでは復号済みバイト列をそのまま検証済みデータとして扱う。検証済みバイト列だけを同一ディレクトリの一時ファイルへ書き、`os.replace`で置換する。mtimeは一時ファイルへ設定してから置換するため、既存ファイルは取得・復号・検証・一時書き込みの失敗で変更されない。
 

@@ -13,7 +13,7 @@
   "textMergeBaseMaxBytes": 1048576,
   "recheckRemoteBeforeApply": true,
   "ignoreExtra": [
-    "^r2-sync-tools(?:/|$)",
-    "(^|/)\\.env$"
+    "r2-sync-tools/**",
+    "**/.env"
   ]
 }

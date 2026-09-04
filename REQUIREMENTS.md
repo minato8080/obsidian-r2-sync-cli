@@ -87,7 +87,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
 - R2取得・内容確認は`fetchConcurrency`の指定数、Vault書き込みとR2変更は1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
-- Python版の`ignoreExtra`はRemotely Saveの「Regex of Path to Ignore」に倣い、Vaultルートからの相対パス（区切りは`/`）へ適用する正規表現の配列とする。各正規表現はパス全体の任意位置に一致でき、`^`と`$`でVaultルート基準の完全な位置を指定できる。ディレクトリを除外した場合はその配下も除外し、ローカル走査と復号後のR2一覧へ同じ判定を適用する。Node版の`IGNORE_EXTRA`は既存のconfigディレクトリ基準Gitignore風globを維持する
+- Python版の`ignoreExtra`はVaultルートからの相対パス（区切りは`/`）へ適用するGitignore風globの配列とする。`foo/bar/**`はVault直下の対象ディレクトリと配下、`**/.env`はVault全階層の`.env`、`.git`のようにスラッシュを含まないパターンは全階層の同名要素に一致する。ローカル走査と復号後のR2一覧へ同じ判定を適用する。Node版の`IGNORE_EXTRA`は既存のconfigディレクトリ基準を維持する
 - PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
 - 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
 - stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う

@@ -314,7 +314,7 @@ class PullProbeTests(unittest.TestCase):
             self.assertIn("dry-runのため実際の変更は行っていません", stderr.getvalue())
             self.assertIn("=== 実行結果 ===", stderr.getvalue())
 
-    def test_nested_config_ignore_regex_still_uses_vault_root(self):
+    def test_nested_config_ignore_glob_still_uses_vault_root(self):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             vault = root_path / "vault"
@@ -332,7 +332,7 @@ class PullProbeTests(unittest.TestCase):
                 "secretAccessKey": "secret",
                 "encryption": "plain",
                 "mode": "full",
-                "ignoreExtra": [r"^elsewhere(?:/|$)", r"^tools/python/r2-sync(?:/|$)"],
+                "ignoreExtra": ["elsewhere/**", "tools/python/r2-sync/**"],
             }), encoding="utf-8")
             remote = FakeRemote({})
             client = mock.Mock(
@@ -371,7 +371,7 @@ class PullProbeTests(unittest.TestCase):
                 "accessKeyId": "key",
                 "secretAccessKey": "secret",
                 "mode": "full",
-                "ignoreExtra": [r"^ignored(?:/|$)", r"(^|/)\.env$"],
+                "ignoreExtra": ["ignored/**", "**/.env"],
             }), encoding="utf-8")
             listed_stdout = io.StringIO()
             checked_stdout = io.StringIO()
@@ -508,9 +508,11 @@ class PullProbeTests(unittest.TestCase):
             self.assertFalse(result["ok"], result)
             self.assertEqual((vault / "note.md").read_bytes(), b"concurrent-local")
 
-    def test_invalid_ignore_regex_is_rejected(self):
-        with self.assertRaisesRegex(pull_module.PullError, "invalid ignoreExtra regex"):
-            _ignore_matcher(["/**"])
+    def test_vault_root_glob_matches_directory_and_descendants(self):
+        ignored_dir, ignored_file = _ignore_matcher(["tools/r2-sync/**"])
+        self.assertTrue(ignored_dir("tools/r2-sync"))
+        self.assertTrue(ignored_file("tools/r2-sync/sync.py"))
+        self.assertFalse(ignored_file("other/tools/r2-sync/sync.py"))
 
     def test_both_gone_path_is_forgotten_from_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
@@ -614,8 +616,8 @@ class PullProbeTests(unittest.TestCase):
             finally:
                 os.chdir(previous_cwd)
 
-    def test_ignore_regex_character_class(self):
-        _, ignored_file = _ignore_matcher([r"^tools/secret[1-9]\.md$"])
+    def test_ignore_glob_character_class(self):
+        _, ignored_file = _ignore_matcher(["tools/secret[1-9].md"])
         self.assertFalse(ignored_file("tools/secret0.md"))
         self.assertTrue(ignored_file("tools/secret1.md"))
         self.assertFalse(ignored_file("tools/nested/secret2.md"))
@@ -647,28 +649,29 @@ class PullProbeTests(unittest.TestCase):
             self.assertFalse(result["ok"], result)
             self.assertEqual(remote.objects["note.md"].data, b"concurrent-remote")
 
-    def test_vault_relative_ignore_regexes(self):
+    def test_vault_relative_ignore_globs(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"
             for rel_path in (
-                "tools/python/r2-sync/sync.py", "tools/js/r2-sync/app.js", "tools/python/keep.py",
-                ".env", "project/.env", "project/.env.example", ".obsidian/community-plugins.json",
-                ".obsidian/plugins.json", "justfile", "notes/keep.md",
+                "scripts/python/r2-sync/sync.py", "scripts/js/r2-sync/app.js", "scripts/python/keep.py",
+                ".env", "project/.env", "project/.env.example", ".obsidian/plugins/remotely-save/data.json",
+                ".obsidian/plugins.json", ".git/config", "justfile", "notes/keep.md",
             ):
                 target = vault / rel_path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(rel_path, encoding="utf-8")
             files = _scan_vault(vault, [
-                r"^tools/(?:python|js)/r2-sync(?:/|$)",
-                r"(^|/)\.env$",
-                r"^\.obsidian/community-plugins\.json$",
-                r"^justfile$",
+                "scripts/python/r2-sync/**",
+                "scripts/js/r2-sync/**",
+                ".obsidian/plugins/remotely-save/data.json",
+                "**/.env",
+                ".git",
             ])
             self.assertEqual(sorted(files), [
-                ".obsidian/plugins.json", "notes/keep.md", "project/.env.example", "tools/python/keep.py",
+                ".obsidian/plugins.json", "justfile", "notes/keep.md", "project/.env.example", "scripts/python/keep.py",
             ])
 
-    def test_vault_relative_ignore_regex_filters_remote_objects(self):
+    def test_vault_relative_ignore_glob_filters_remote_objects(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"
             state = Path(root) / "state.json"
@@ -679,7 +682,7 @@ class PullProbeTests(unittest.TestCase):
 
             result = execute_full_sync(
                 vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(),
-                extra_patterns=[r"^tools/js/r2-sync(?:/|$)"], apply=False, push=True,
+                extra_patterns=["tools/js/r2-sync/**"], apply=False, push=True,
             )
 
             self.assertTrue(result["ok"], result)
@@ -700,7 +703,7 @@ class PullProbeTests(unittest.TestCase):
 
             result = execute_full_sync(
                 vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(),
-                extra_patterns=[r"^ios(?:/|$)"], apply=True, push=True,
+                extra_patterns=["ios/**"], apply=True, push=True,
             )
 
             self.assertTrue(result["ok"])

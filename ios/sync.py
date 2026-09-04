@@ -877,27 +877,94 @@ def execute_probe(
     return result
 
 
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    parts = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*" and index + 1 < len(pattern) and pattern[index + 1] == "*":
+            if index + 2 < len(pattern) and pattern[index + 2] == "/":
+                parts.append("(?:.*/)?")
+                index += 3
+            else:
+                parts.append(".*")
+                index += 2
+        elif char == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif char == "?":
+            parts.append("[^/]")
+            index += 1
+        elif char == "[":
+            end = pattern.find("]", index + 1)
+            if end == -1 or end == index + 1:
+                parts.append(r"\[")
+                index += 1
+            else:
+                content = pattern[index + 1:end].replace("\\", r"\\")
+                if content.startswith("!"):
+                    content = "^" + content[1:]
+                parts.append(f"[{content}]")
+                index = end + 1
+        else:
+            parts.append(re.escape(char))
+            index += 1
+    return re.compile("^" + "".join(parts) + "$")
+
+
 def _ignore_matcher(
     extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
 ):
-    """Return a Remotely Save-style regex matcher for vault-relative paths."""
+    """Return a gitignore-style glob matcher for vault-relative paths."""
     protected = {path.replace("\\", "/").strip("/") for path in (protected_paths or []) if path}
     patterns = []
     for raw in extra_patterns or []:
         if not isinstance(raw, str):
             continue
-        value = raw.strip()
+        value = raw.replace("\\", "/").strip()
         if not value:
             continue
-        try:
-            patterns.append(re.compile(value))
-        except re.error as error:
-            raise PullError(f"invalid ignoreExtra regex {raw!r}: {error}") from error
+        legacy_anchored = value.startswith("./")
+        anchored = legacy_anchored or value.startswith("/")
+        if legacy_anchored:
+            value = value[2:]
+        value = value.lstrip("/")
+        dir_only = value.endswith("/")
+        if dir_only:
+            value = value[:-1]
+        if not value:
+            continue
+        has_slash = "/" in value
+        patterns.append({
+            "pattern": value,
+            "regex": _glob_regex(value),
+            "any_depth": not anchored and not has_slash,
+            "dir_only": dir_only,
+        })
+
+    def path_prefixes(rel_path: str) -> list[str]:
+        parts = rel_path.split("/")
+        return ["/".join(parts[:index + 1]) for index in range(len(parts))]
 
     def matches_extra(rel_path: str, is_file: bool) -> bool:
         normalized = rel_path.replace("\\", "/").strip("/")
-        candidate = normalized if is_file else normalized + "/"
-        return any(pattern.search(candidate) for pattern in patterns)
+        for item in patterns:
+            pattern = item["pattern"]
+            regex = item["regex"]
+            if item["any_depth"]:
+                parts = normalized.split("/")
+                candidates = parts[:-1] if is_file and item["dir_only"] else parts
+                if any(regex.match(part) for part in candidates):
+                    return True
+                continue
+            for prefix in path_prefixes(normalized):
+                if item["dir_only"] and is_file and prefix == normalized:
+                    continue
+                if regex.match(prefix) or (
+                    pattern.endswith("/**") and prefix == pattern[:-3]
+                ):
+                    return True
+        return False
 
     def ignored_dir(rel_path: str) -> bool:
         name = rel_path.rsplit("/", 1)[-1]
