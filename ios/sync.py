@@ -959,6 +959,34 @@ def _scan_vault(
     return result
 
 
+def _list_ignored_paths(
+    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
+) -> list[str]:
+    """List paths excluded by the sync matcher without changing the vault."""
+    ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
+    result = []
+
+    def walk(directory: Path, rel_dir: str) -> None:
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as error:
+            raise PullError(f"cannot scan vault: {directory}") from error
+        for entry in entries:
+            rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            if entry.is_dir(follow_symlinks=False):
+                if ignored_dir(rel_path):
+                    result.append(rel_path + "/")
+                else:
+                    walk(Path(entry.path), rel_path)
+            elif entry.is_file(follow_symlinks=False) and ignored_file(rel_path):
+                result.append(rel_path)
+
+    if not vault.exists() or not vault.is_dir():
+        raise PullError("vaultPath must be an existing directory")
+    walk(vault, "")
+    return result
+
+
 def _remote_mtime_ms(remote: RemoteObject, listed: dict) -> float:
     if remote.metadata.get("mtime") or remote.metadata.get("mmtime") or remote.metadata.get("mtime-ms"):
         return _mtime_ms(remote.metadata)
@@ -1829,6 +1857,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, help="path to the JSON config")
     parser.add_argument("--apply", action="store_true", help="replace vault files and checkpoint state")
     parser.add_argument("--allow-delete", action="store_true", help="allow planned remote/local deletions in full mode")
+    parser.add_argument(
+        "--check-ignore", nargs="*", metavar="PATH",
+        help="check ignored vault-relative paths locally; omit PATH to list ignored vault entries",
+    )
     # Kept hidden so an already-installed Shortcut can be migrated separately.
     parser.add_argument("--full", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--push", action="store_true", help=argparse.SUPPRESS)
@@ -1839,8 +1871,32 @@ def main(argv: list[str] | None = None) -> int:
         config_path = Path(args.config).expanduser().resolve()
         config = _load_config(config_path)
         state_path = _config_relative_path(config["statePath"], config_path)
-        config_rel_path = _state_rel_path(Path(config["vaultPath"]).expanduser().resolve(), config_path)
+        vault_path = Path(config["vaultPath"]).expanduser().resolve()
+        config_rel_path = _state_rel_path(vault_path, config_path)
         extra_protected_paths = [config_rel_path] if config_rel_path else []
+        state_rel_path = _state_rel_path(vault_path, state_path)
+        protected_paths = ([state_rel_path] if state_rel_path else []) + extra_protected_paths
+        if args.check_ignore is not None:
+            print("=== 除外判定（ローカルのみ / R2通信なし）===")
+            print(f"vault: {vault_path}")
+            print(f"ignoreExtra: {len(config.get('ignoreExtra', []))}件")
+            if args.check_ignore:
+                ignored_dir, ignored_file = _ignore_matcher(config.get("ignoreExtra", []), protected_paths)
+                all_ignored = True
+                for raw_path in args.check_ignore:
+                    is_dir = raw_path.endswith(("/", "\\"))
+                    rel_path = _safe_relative(raw_path.rstrip("/\\"))
+                    target = _vault_path(vault_path, rel_path)
+                    is_dir = is_dir or target.is_dir()
+                    ignored = ignored_dir(rel_path) if is_dir else ignored_file(rel_path)
+                    print(f"[{'IGNORED' if ignored else 'INCLUDED'}] {rel_path}{'/' if is_dir else ''}")
+                    all_ignored = all_ignored and ignored
+                return 0 if all_ignored else 1
+            ignored_paths = _list_ignored_paths(vault_path, config.get("ignoreExtra", []), protected_paths)
+            for rel_path in ignored_paths:
+                print(f"[IGNORED] {rel_path}")
+            print(f"ignored: {len(ignored_paths)}件")
+            return 0
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):
             raise PullError("encryption must be rclone-base64 or plain")

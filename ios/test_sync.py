@@ -352,6 +352,48 @@ class PullProbeTests(unittest.TestCase):
             self.assertEqual(payload["scannedLocal"], 1)
             self.assertEqual(payload["plannedByType"], {"PUSH": 1})
 
+    def test_main_check_ignore_never_constructs_r2_client(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            vault = root_path / "vault"
+            (vault / "ignored").mkdir(parents=True)
+            (vault / "ignored" / "file.txt").write_text("ignored", encoding="utf-8")
+            (vault / ".env").write_text("ignored", encoding="utf-8")
+            (vault / "state.json").write_text("ignored", encoding="utf-8")
+            (vault / "keep.txt").write_text("keep", encoding="utf-8")
+            config = root_path / "config.json"
+            state = root_path / "checkpoint.json"
+            config.write_text(json.dumps({
+                "vaultPath": str(vault),
+                "statePath": str(state),
+                "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+                "bucket": "<bucket-name>",
+                "accessKeyId": "key",
+                "secretAccessKey": "secret",
+                "mode": "full",
+                "ignoreExtra": [r"^ignored(?:/|$)", r"(^|/)\.env$"],
+            }), encoding="utf-8")
+            listed_stdout = io.StringIO()
+            checked_stdout = io.StringIO()
+
+            with mock.patch.object(pull_module, "R2Client", side_effect=AssertionError("R2 must not be used")):
+                with redirect_stdout(listed_stdout), redirect_stderr(io.StringIO()):
+                    list_exit = pull_module.main(["--config", str(config), "--check-ignore"])
+                with redirect_stdout(checked_stdout), redirect_stderr(io.StringIO()):
+                    check_exit = pull_module.main([
+                        "--config", str(config), "--check-ignore", "ignored/file.txt", "keep.txt",
+                    ])
+
+            self.assertEqual(list_exit, 0)
+            self.assertIn("[IGNORED] ignored/", listed_stdout.getvalue())
+            self.assertIn("[IGNORED] .env", listed_stdout.getvalue())
+            self.assertIn("[IGNORED] state.json", listed_stdout.getvalue())
+            self.assertNotIn("keep.txt", listed_stdout.getvalue())
+            self.assertEqual(check_exit, 1)
+            self.assertIn("[IGNORED] ignored/file.txt", checked_stdout.getvalue())
+            self.assertIn("[INCLUDED] keep.txt", checked_stdout.getvalue())
+            self.assertFalse(state.exists())
+
     def test_config_rejects_unsafe_performance_option_types(self):
         with tempfile.TemporaryDirectory() as root:
             config = Path(root) / "config.json"
