@@ -508,6 +508,33 @@ class PullProbeTests(unittest.TestCase):
             self.assertEqual(result["planned"], 0)
             self.assertEqual(set(remote.objects), {"tools/state.json"})
 
+    def test_state_json_basename_is_always_ignored_locally_and_remotely(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            for rel_path in ("state.json", "nested/state.json", "state.json.bak", "local.txt"):
+                target = vault / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(rel_path, encoding="utf-8")
+            remote = FakeRemote({
+                "state.json": RemoteObject(b"ignored", "root-state", {}),
+                "nested/state.json": RemoteObject(b"ignored", "nested-state", {}),
+                "remote.txt": RemoteObject(b"keep", "remote", {}),
+            })
+
+            result = execute_full_sync(
+                vault, Path(root) / "checkpoint.json",
+                remote.list, remote.get, remote.put, remote.delete, PlainContent(),
+                apply=False, push=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["scannedLocal"], 2)
+            self.assertEqual(
+                {item["path"] for item in result["ignoredRemoteObjects"]},
+                {"state.json", "nested/state.json"},
+            )
+            self.assertEqual(result["plannedByType"], {"PUSH": 2, "PULL": 1})
+
     def test_config_is_protected_without_ignore_pattern(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"

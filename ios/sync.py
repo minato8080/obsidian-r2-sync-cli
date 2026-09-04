@@ -918,7 +918,7 @@ def _ignore_matcher(
         return (
             rel_path in protected
             or protected_temp
-            or basename in {".DS_Store", "Thumbs.db"}
+            or basename in {".DS_Store", "Thumbs.db", "state.json"}
             or any(part in {".git", "node_modules"} for part in parts[:-1])
             or matches_extra(rel_path, True)
         )
