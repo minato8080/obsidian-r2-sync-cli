@@ -57,7 +57,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - T1はショートカット起動からVaultへの直接ファイル置換完了までとし、中央値5秒以内を目標にする
 - 同一条件を10回測定し、95パーセンタイル10秒以内を目安にする
 - Obsidianが外部変更を認識するまでのT2は別計測とする
-- R2確認・取得は最大2並列、Vault書き込みは初期値1並列とする
+- iOS/Python版のR2取得・内容確認は`fetchConcurrency`で1〜16並列を指定でき、既定値は2とする。Vault書き込みとR2変更は1並列を維持する
+- iOS/Python版のR2リクエストtimeoutは`requestTimeoutSeconds`で1〜300秒を指定でき、既定値は30秒とする
 - PC版の並列数8は変更しない
 - 定常時の全件NOOP判定ではファイル内容を再読込せず、走査で取得したmtime/sizeを前回stateと比較する
 - `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`を個別に返す
@@ -85,7 +86,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 - `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
-- R2取得・内容確認は最大2並列、Vault書き込みとR2変更は初期値1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
+- R2取得・内容確認は`fetchConcurrency`の指定数、Vault書き込みとR2変更は1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
 - `IGNORE_EXTRA`と`ignoreExtra`は設定ファイルのあるディレクトリを基準にしたGitignore風globを指定できる。先頭`/`は基準ディレクトリ直下、スラッシュなしのパターンは基準ディレクトリ以下の全階層、`*`・`?`・`[]`・`**`・末尾`/`をサポートし、Node版とiOS版で挙動を揃える。`./path`は旧設定互換で`/path`と同じ扱いにする
 - PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
 - 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
@@ -99,6 +100,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSH・PULL・削除・mergeは成功ごとのcheckpointを維持する
 - `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する
 - `recheckRemoteBeforeApply`は真偽値とし、既定値は`true`とする。明示的に`false`を指定した場合だけ適用直前のR2再一覧を省略し、警告と結果JSONのフラグで安全確認を省略したことを示す
+- Python版の並列取得中にCtrl+Cを受けた場合は、未開始タスクを取り消してworker待機をせず終了する。取得・検証段階ではVault、R2、stateを変更しない
+- Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
 

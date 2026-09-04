@@ -116,6 +116,10 @@ stateが添付ファイルのmerge baseで大きくなる場合は、設定へ`"
 
 適用直前のR2再一覧は既定で有効である。同期中に他クライアントがR2を変更しないことを手動運用で保証できる場合に限り、`"recheckRemoteBeforeApply": false`で省略できる。省略時は競合更新を直前検出できないため、通常は`true`のまま使う。
 
+Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、1リクエストのtimeoutは`"requestTimeoutSeconds": 30`（1〜300秒）で設定できる。PC上で通信が止まる場合は、まず`fetchConcurrency`を1、`requestTimeoutSeconds`を10程度に下げて切り分ける。`python`と`python3`のコマンド名の違い自体は原因ではなく、Python 3.9以上であれば同じ実装を実行する。
+
+取得・検証中のCtrl+Cは未開始リクエストを取り消し、workerの終了待ちをせずCLIを終了する。この段階ではVault、R2、stateをまだ変更していない。これらの設定と中断処理はPython版だけに適用し、Node版は従来どおり固定8並列のままとする。
+
 ## 実行のたびに確認すること
 
 - 両側で変更されたUTF-8テキストは、stateにmerge baseがあれば3-way mergeする。同じ行の変更、baseなし、またはバイナリでは全体を競合停止し、どちらの内容も上書きしない。

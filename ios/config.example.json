@@ -8,6 +8,8 @@
   "password": "<sync-password>",
   "mode": "full",
   "remotePrefix": "",
+  "fetchConcurrency": 2,
+  "requestTimeoutSeconds": 30,
   "textMergeBaseMaxBytes": 1048576,
   "recheckRemoteBeforeApply": true,
   "ignoreExtra": [

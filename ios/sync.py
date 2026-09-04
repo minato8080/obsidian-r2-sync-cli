@@ -89,6 +89,10 @@ class PullError(Exception):
     """An expected, user-facing pull failure."""
 
 
+class ParallelInterrupted(KeyboardInterrupt):
+    """Ctrl+C received while worker threads may still be blocked."""
+
+
 def _gf_mul(a: int, b: int) -> int:
     out = 0
     for _ in range(8):
@@ -601,6 +605,59 @@ class R2Client:
                 return items
 
 
+def _run_parallel(items: list, worker, concurrency: int, on_progress=None) -> list[tuple[object, concurrent.futures.Future]]:
+    """Run read-only work and return futures in input order.
+
+    ThreadPoolExecutor's context manager waits for every worker while unwinding.
+    That makes Ctrl+C appear ineffective when a network worker is blocked.  On
+    interruption, cancel work that has not started and deliberately skip that
+    wait; the CLI entry point then exits without running Python's thread join.
+    """
+    if not items:
+        return []
+    worker_count = min(concurrency, len(items))
+    if worker_count == 1:
+        completed = []
+        for index, item in enumerate(items, start=1):
+            future = concurrent.futures.Future()
+            try:
+                future.set_result(worker(item))
+            except Exception as error:
+                future.set_exception(error)
+            completed.append((item, future))
+            if on_progress:
+                on_progress(index, len(items))
+        return completed
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+    future_items = {pool.submit(worker, item): (index, item) for index, item in enumerate(items)}
+    completed = [None] * len(items)
+    try:
+        for done, future in enumerate(concurrent.futures.as_completed(future_items), start=1):
+            index, item = future_items[future]
+            completed[index] = (item, future)
+            if on_progress:
+                on_progress(done, len(items))
+    except KeyboardInterrupt as error:
+        for future in future_items:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise ParallelInterrupted() from error
+    except BaseException:
+        for future in future_items:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+    return completed
+
+
+def _report_fetch_progress(progress, done: int, total: int) -> None:
+    if total <= 10 or done % 50 == 0 or done == total:
+        _emit_progress(progress, f"  取得・検証中: {done}/{total}")
+
+
 def _safe_relative(value: str) -> str:
     normalized = value.replace("\\", "/")
     path = PurePosixPath(normalized)
@@ -728,6 +785,7 @@ def execute_probe(
     decoder,
     apply: bool = False,
     extra_protected_paths: list[str] | None = None,
+    fetch_concurrency: int = 2,
     progress=None,
 ) -> dict:
     """Fetch and optionally apply explicit PULL files.
@@ -766,7 +824,7 @@ def execute_probe(
 
     prepared = []
     errors = []
-    _emit_progress(progress, f"R2から取得・検証しています(並列{min(2, len(specs))}件)...")
+    _emit_progress(progress, f"R2から取得・検証しています(並列{min(fetch_concurrency, len(specs))}件)...")
 
     def prepare(spec):
         rel_path, key = spec
@@ -778,15 +836,15 @@ def execute_probe(
             raise PullError("decrypted content is not UTF-8") from error
         return {"path": rel_path, "data": clear, "etag": remote.etag, "mtimeMs": _mtime_ms(remote.metadata)}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(specs))) as pool:
-        futures = [pool.submit(prepare, spec) for spec in specs]
-        for index, (spec, future) in enumerate(zip(specs, futures), start=1):
-            try:
-                prepared.append(future.result())
-            except Exception as error:  # keep result JSON safe; no file has been written yet
-                errors.append({"path": spec[0], "error": str(error)})
-            if index % 50 == 0 or index == len(specs):
-                _emit_progress(progress, f"  取得・検証中: {index}/{len(specs)}")
+    completed = _run_parallel(
+        specs, prepare, fetch_concurrency,
+        lambda done, total: _report_fetch_progress(progress, done, total),
+    )
+    for spec, future in completed:
+        try:
+            prepared.append(future.result())
+        except Exception as error:  # keep result JSON safe; no file has been written yet
+            errors.append({"path": spec[0], "error": str(error)})
     fetch_validate_ms = round((time.perf_counter() - started) * 1000, 2) - conflict_check_ms
     if errors:
         total_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -1176,6 +1234,7 @@ def execute_full(
     apply: bool = False,
     ignore_base_rel_path: str = "",
     extra_protected_paths: list[str] | None = None,
+    fetch_concurrency: int = 2,
 ) -> dict:
     """Run a full, PULL-only scan with all writes deferred until validation."""
     started = time.perf_counter()
@@ -1290,22 +1349,21 @@ def execute_full(
 
     fetch_actions = actions + bootstrap
     errors = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(fetch_actions)) or 1) as pool:
-        futures = [pool.submit(prepare, action) for action in fetch_actions]
-        for action, future in zip(fetch_actions, futures):
-            try:
-                item = future.result()
-                if action["type"] == "SEED_OR_CONFLICT":
-                    target = _vault_path(vault, action["path"])
-                    if target.read_bytes() == item["data"]:
-                        item["type"] = "SEED"
-                        actions.append(item)
-                    else:
-                        conflicts.append({"path": action["path"], "reason": "local and remote contents differ without a checkpoint"})
+    completed = _run_parallel(fetch_actions, prepare, fetch_concurrency)
+    for action, future in completed:
+        try:
+            item = future.result()
+            if action["type"] == "SEED_OR_CONFLICT":
+                target = _vault_path(vault, action["path"])
+                if target.read_bytes() == item["data"]:
+                    item["type"] = "SEED"
+                    actions.append(item)
                 else:
-                    prepared.append(item)
-            except Exception as error:
-                errors.append({"path": action["path"], "error": str(error)})
+                    conflicts.append({"path": action["path"], "reason": "local and remote contents differ without a checkpoint"})
+            else:
+                prepared.append(item)
+        except Exception as error:
+            errors.append({"path": action["path"], "error": str(error)})
     fetch_validate_ms = round((time.perf_counter() - started) * 1000, 2) - scan_ms - conflict_check_ms
     if conflicts or errors:
         total_ms = round((time.perf_counter() - started) * 1000, 2)
@@ -1396,6 +1454,7 @@ def execute_full_sync(
     extra_protected_paths: list[str] | None = None,
     text_merge_base_max_bytes: int | None = None,
     recheck_remote_before_apply: bool = True,
+    fetch_concurrency: int = 2,
     progress=None,
 ) -> dict:
     """Run the opt-in full bidirectional sync path.
@@ -1515,58 +1574,58 @@ def execute_full_sync(
 
     errors = []
     if candidates:
-        _emit_progress(progress, f"R2から取得・検証しています(並列{min(2, len(candidates))}件)...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(candidates)) or 1) as pool:
-        futures = [pool.submit(fetch_candidate, candidate) for candidate in candidates]
-        for index, (candidate, future) in enumerate(zip(candidates, futures), start=1):
-            try:
-                candidate, remote_object, remote_bytes = future.result()
-                prepared_count += 1
-                path_name = candidate["path"]
-                remote_info = candidate["remote"]
-                local_bytes = candidate.get("localBytes")
-                if candidate["type"] == "REMOTE_CHANGED" and remote_bytes == local_bytes:
-                    actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "リモート再アップロードのみ・内容一致のため転送スキップ"})
-                elif candidate["type"] == "REMOTE_CHANGED":
-                    add_pull(path_name, remote_info, True)
-                    actions[-1].update({"data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest()})
-                elif candidate["type"] in ("NEW_REMOTE", "RESTORE_REMOTE_CHANGED"):
-                    actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": False, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "reason": candidate.get("reason")})
-                elif candidate["type"] == "BOOTSTRAP" and remote_bytes == local_bytes:
-                    actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes})
-                elif candidate["type"] == "BOOTSTRAP":
-                    remote_mtime = _remote_mtime_ms(remote_object, remote_info)
-                    if candidate["localMtimeMs"] > remote_mtime and push:
-                        actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "初回比較: 内容不一致・ローカルの方が新しいため上書き"})
-                    elif candidate["localMtimeMs"] > remote_mtime:
-                        conflicts.append({"path": path_name, "reason": "local is newer on bootstrap and PUSH is disabled"})
-                    else:
-                        actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": True, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": remote_mtime, "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "reason": "初回比較: 内容不一致・リモートの方が新しいため上書き"})
+        _emit_progress(progress, f"R2から取得・検証しています(並列{min(fetch_concurrency, len(candidates))}件)...")
+    completed = _run_parallel(
+        candidates, fetch_candidate, fetch_concurrency,
+        lambda done, total: _report_fetch_progress(progress, done, total),
+    )
+    for candidate, future in completed:
+        try:
+            candidate, remote_object, remote_bytes = future.result()
+            prepared_count += 1
+            path_name = candidate["path"]
+            remote_info = candidate["remote"]
+            local_bytes = candidate.get("localBytes")
+            if candidate["type"] == "REMOTE_CHANGED" and remote_bytes == local_bytes:
+                actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "リモート再アップロードのみ・内容一致のため転送スキップ"})
+            elif candidate["type"] == "REMOTE_CHANGED":
+                add_pull(path_name, remote_info, True)
+                actions[-1].update({"data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest()})
+            elif candidate["type"] in ("NEW_REMOTE", "RESTORE_REMOTE_CHANGED"):
+                actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": False, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "reason": candidate.get("reason")})
+            elif candidate["type"] == "BOOTSTRAP" and remote_bytes == local_bytes:
+                actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes})
+            elif candidate["type"] == "BOOTSTRAP":
+                remote_mtime = _remote_mtime_ms(remote_object, remote_info)
+                if candidate["localMtimeMs"] > remote_mtime and push:
+                    actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "初回比較: 内容不一致・ローカルの方が新しいため上書き"})
+                elif candidate["localMtimeMs"] > remote_mtime:
+                    conflicts.append({"path": path_name, "reason": "local is newer on bootstrap and PUSH is disabled"})
                 else:
-                    if remote_bytes == local_bytes:
-                        actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "両側でtouchされたが内容は一致・転送スキップ"})
+                    actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": True, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": remote_mtime, "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "reason": "初回比較: 内容不一致・リモートの方が新しいため上書き"})
+            else:
+                if remote_bytes == local_bytes:
+                    actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "両側でtouchされたが内容は一致・転送スキップ"})
+                    continue
+                prev = candidate["prev"]
+                if merge:
+                    base = _state_base_bytes(prev)
+                    if base is None:
+                        conflicts.append({"path": path_name, "reason": "merge base is unavailable in checkpoint state"})
                         continue
-                    prev = candidate["prev"]
-                    if merge:
-                        base = _state_base_bytes(prev)
-                        if base is None:
-                            conflicts.append({"path": path_name, "reason": "merge base is unavailable in checkpoint state"})
-                            continue
-                        merged, has_conflict = three_way_merge(base, local_bytes, remote_bytes)
-                        if has_conflict or merged is None:
-                            conflicts.append({"path": path_name, "reason": "three-way merge conflict"})
-                            continue
-                        actions.append({"type": "MERGE", "path": path_name, "remote": remote_info, "data": merged, "localMtimeMs": max(candidate["localMtimeMs"], _remote_mtime_ms(remote_object, remote_info)), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "remoteBytes": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "reason": "両側変更・3-way merge"})
-                    elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info) and push:
-                        actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "両側変更・ローカルの方が新しいため上書き"})
-                    elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info):
-                        conflicts.append({"path": path_name, "reason": "both sides changed and PUSH is disabled"})
-                    else:
-                        actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": True, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "reason": "両側変更・リモートの方が新しいため上書き"})
-            except Exception as error:
-                errors.append({"path": candidate["path"], "error": str(error)})
-            if index % 50 == 0 or index == len(candidates):
-                _emit_progress(progress, f"  取得・検証中: {index}/{len(candidates)}")
+                    merged, has_conflict = three_way_merge(base, local_bytes, remote_bytes)
+                    if has_conflict or merged is None:
+                        conflicts.append({"path": path_name, "reason": "three-way merge conflict"})
+                        continue
+                    actions.append({"type": "MERGE", "path": path_name, "remote": remote_info, "data": merged, "localMtimeMs": max(candidate["localMtimeMs"], _remote_mtime_ms(remote_object, remote_info)), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "remoteBytes": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "reason": "両側変更・3-way merge"})
+                elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info) and push:
+                    actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "両側変更・ローカルの方が新しいため上書き"})
+                elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info):
+                    conflicts.append({"path": path_name, "reason": "both sides changed and PUSH is disabled"})
+                else:
+                    actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": True, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "reason": "両側変更・リモートの方が新しいため上書き"})
+        except Exception as error:
+            errors.append({"path": candidate["path"], "error": str(error)})
 
     fetch_validate_ms = round((time.perf_counter() - conflict_check_finished) * 1000, 2)
     unchanged = sum(action["type"] == "NOOP" for action in actions)
@@ -1580,6 +1639,7 @@ def execute_full_sync(
         "applied": 0, "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
         "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
         "remoteSnapshotRechecked": False,
+        "fetchConcurrency": fetch_concurrency,
         "mergeBasesPruned": 0, "mergeBasesPendingPrune": merge_bases_to_prune,
         "plannedByType": counts, "appliedByType": {}, "skippedByType": {},
         "timingsMs": {
@@ -1843,6 +1903,12 @@ def _load_config(path: Path) -> dict:
         raise PullError("textMergeBaseMaxBytes must be a non-negative integer")
     if "recheckRemoteBeforeApply" in config and not isinstance(config["recheckRemoteBeforeApply"], bool):
         raise PullError("recheckRemoteBeforeApply must be true or false")
+    fetch_concurrency = config.get("fetchConcurrency", 2)
+    if isinstance(fetch_concurrency, bool) or not isinstance(fetch_concurrency, int) or not 1 <= fetch_concurrency <= 16:
+        raise PullError("fetchConcurrency must be an integer from 1 to 16")
+    request_timeout = config.get("requestTimeoutSeconds", 30)
+    if isinstance(request_timeout, bool) or not isinstance(request_timeout, (int, float)) or not 1 <= request_timeout <= 300:
+        raise PullError("requestTimeoutSeconds must be a number from 1 to 300")
     return config
 
 
@@ -1868,12 +1934,18 @@ def main(argv: list[str] | None = None) -> int:
         if mode not in ("rclone-base64", "plain"):
             raise PullError("encryption must be rclone-base64 or plain")
         decoder = RcloneBase64(config.get("password", "")) if mode == "rclone-base64" else PlainContent()
-        r2 = R2Client(config["endpoint"], config["bucket"], config["accessKeyId"], config["secretAccessKey"])
+        fetch_concurrency = config.get("fetchConcurrency", 2)
+        request_timeout = config.get("requestTimeoutSeconds", 30)
+        r2 = R2Client(
+            config["endpoint"], config["bucket"], config["accessKeyId"], config["secretAccessKey"],
+            timeout=request_timeout,
+        )
         prefix = str(config.get("remotePrefix", "")).replace("\\", "/").strip("/")
         prefix = prefix + "/" if prefix else ""
         full = args.full or config.get("mode") == "full"
         progress(f"vault: {config['vaultPath']}")
         progress(f"mode: {'APPLY (削除含む)' if args.apply and args.allow_delete else 'APPLY (削除は警告のみ)' if args.apply else 'DRY-RUN'}")
+        progress(f"fetch concurrency: {fetch_concurrency} / request timeout: {request_timeout}秒")
         if full:
             result = execute_full_sync(
                 config["vaultPath"], state_path, r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
@@ -1882,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
                 extra_protected_paths=extra_protected_paths,
                 text_merge_base_max_bytes=config.get("textMergeBaseMaxBytes"),
                 recheck_remote_before_apply=config.get("recheckRemoteBeforeApply", True),
+                fetch_concurrency=fetch_concurrency,
                 progress=progress,
             )
         else:
@@ -1893,7 +1966,7 @@ def main(argv: list[str] | None = None) -> int:
                     item["key"] = prefix + (decoder.encrypt_path(_safe_relative(item["path"])) if mode == "rclone-base64" else _safe_relative(item["path"]))
             result = execute_probe(
                 config["vaultPath"], state_path, files, r2.get_object, decoder, args.apply,
-                extra_protected_paths=extra_protected_paths, progress=progress,
+                extra_protected_paths=extra_protected_paths, fetch_concurrency=fetch_concurrency, progress=progress,
             )
         _report_result(progress, result)
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
@@ -1906,4 +1979,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ParallelInterrupted:
+        print("\n中断しました。", file=sys.stderr, flush=True)
+        os._exit(130)
+    except KeyboardInterrupt:
+        print("\n中断しました。", file=sys.stderr, flush=True)
+        raise SystemExit(130)

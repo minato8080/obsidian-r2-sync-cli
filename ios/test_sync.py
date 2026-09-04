@@ -280,6 +280,8 @@ class PullProbeTests(unittest.TestCase):
                 "secretAccessKey": "secret",
                 "encryption": "plain",
                 "mode": "full",
+                "fetchConcurrency": 1,
+                "requestTimeoutSeconds": 7.5,
                 "textMergeBaseMaxBytes": 4,
                 "recheckRemoteBeforeApply": False,
             }), encoding="utf-8")
@@ -293,7 +295,7 @@ class PullProbeTests(unittest.TestCase):
             stdout = io.StringIO()
             stderr = io.StringIO()
 
-            with mock.patch.object(pull_module, "R2Client", return_value=client):
+            with mock.patch.object(pull_module, "R2Client", return_value=client) as client_type:
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     exit_code = pull_module.main(["--config", str(config)])
 
@@ -303,8 +305,14 @@ class PullProbeTests(unittest.TestCase):
             payload = json.loads(output_lines[0])
             self.assertTrue(payload["ok"])
             self.assertFalse(payload["remoteSnapshotRecheckEnabled"])
+            self.assertEqual(payload["fetchConcurrency"], 1)
+            client_type.assert_called_once_with(
+                "https://<account-id>.r2.cloudflarestorage.com", "<bucket-name>", "key", "secret",
+                timeout=7.5,
+            )
             self.assertIn("vault:", stderr.getvalue())
             self.assertIn("mode: DRY-RUN", stderr.getvalue())
+            self.assertIn("fetch concurrency: 1 / request timeout: 7.5秒", stderr.getvalue())
             self.assertIn("dry-runのため実際の変更は行っていません", stderr.getvalue())
             self.assertIn("=== 実行結果 ===", stderr.getvalue())
 
@@ -324,10 +332,66 @@ class PullProbeTests(unittest.TestCase):
                 ("textMergeBaseMaxBytes", -1),
                 ("textMergeBaseMaxBytes", True),
                 ("recheckRemoteBeforeApply", "false"),
+                ("fetchConcurrency", 0),
+                ("fetchConcurrency", 17),
+                ("fetchConcurrency", True),
+                ("fetchConcurrency", 1.5),
+                ("requestTimeoutSeconds", 0),
+                ("requestTimeoutSeconds", 301),
+                ("requestTimeoutSeconds", True),
+                ("requestTimeoutSeconds", "10"),
             ):
                 config.write_text(json.dumps({**base, field: value}), encoding="utf-8")
                 with self.assertRaises(Exception):
                     pull_module._load_config(config)
+
+    def test_fetch_concurrency_one_avoids_executor_and_reports_each_completion(self):
+        completed = []
+        with mock.patch.object(pull_module.concurrent.futures, "ThreadPoolExecutor") as pool_type:
+            results = pull_module._run_parallel(
+                [1, 2, 3], lambda value: value * 10, 1,
+                lambda done, total: completed.append((done, total)),
+            )
+
+        pool_type.assert_not_called()
+        self.assertEqual([future.result() for _, future in results], [10, 20, 30])
+        self.assertEqual(completed, [(1, 3), (2, 3), (3, 3)])
+
+    def test_parallel_interrupt_cancels_pending_work_without_waiting(self):
+        pool = mock.Mock()
+        futures = [mock.Mock(), mock.Mock()]
+        pool.submit.side_effect = futures
+
+        with mock.patch.object(pull_module.concurrent.futures, "ThreadPoolExecutor", return_value=pool):
+            with mock.patch.object(pull_module.concurrent.futures, "as_completed", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    pull_module._run_parallel(["one", "two"], lambda value: value, 2)
+
+        for future in futures:
+            future.cancel.assert_called_once_with()
+        pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_full_sync_uses_configured_fetch_concurrency(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            remote = FakeRemote({
+                "one.md": RemoteObject(b"one", "e1", {}),
+                "two.md": RemoteObject(b"two", "e2", {}),
+                "three.md": RemoteObject(b"three", "e3", {}),
+            })
+            messages = []
+
+            result = execute_full_sync(
+                vault, Path(root) / "state.json", remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), fetch_concurrency=1, progress=messages.append,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["fetchConcurrency"], 1)
+            rendered = "\n".join(messages)
+            self.assertIn("R2から取得・検証しています(並列1件)", rendered)
+            self.assertIn("取得・検証中: 1/3", rendered)
+            self.assertIn("取得・検証中: 3/3", rendered)
 
     def test_local_deleted_remote_changed_pull_has_payload(self):
         with tempfile.TemporaryDirectory() as root:

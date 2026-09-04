@@ -266,11 +266,12 @@ ProbeはPULL専用で、full同期では明示許可されたPUSH、remote/local
 
 ### iOS版の並列性
 
-- R2確認・取得は最大2並列
+- R2確認・取得はconfigの`fetchConcurrency`（1〜16、既定2）を使う
+- R2通信は`requestTimeoutSeconds`（1〜300秒、既定30）でtimeoutを設定する
 - 復号は取得結果ごとに行う
-- Vaultへの書き込みは初期値1並列
-- 1並列／2並列でVault書き込み時間を比較し、書き込みが支配的かを計測で判断する
-- デスクトップ版の並列数8は変更しない
+- Vaultへの書き込みとR2変更は1並列を維持する
+- 完了したfutureから処理して進捗を更新する。Ctrl+Cでは未開始futureを取り消し、executorのworker完了を待たずにCLIを終了する。取得・検証は変更前フェーズなので強制終了しても同期対象とstateは変更されない
+- デスクトップNode版の固定8並列は変更しない。`fetchConcurrency`と`requestTimeoutSeconds`はPython版だけのconfigであり、Node版の`.env`や処理には影響しない
 
 ### iOS版の計測
 
