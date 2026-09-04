@@ -299,10 +299,10 @@ class PullProbeTests(unittest.TestCase):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     exit_code = pull_module.main(["--config", str(config)])
 
-            output_lines = stdout.getvalue().splitlines()
+            output = stdout.getvalue()
             self.assertEqual(exit_code, 0)
-            self.assertEqual(len(output_lines), 1)
-            payload = json.loads(output_lines[0])
+            self.assertGreater(output.count("\n"), 1)
+            payload = json.loads(output)
             self.assertTrue(payload["ok"])
             self.assertFalse(payload["remoteSnapshotRecheckEnabled"])
             self.assertEqual(payload["fetchConcurrency"], 1)

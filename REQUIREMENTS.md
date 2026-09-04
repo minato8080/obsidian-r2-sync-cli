@@ -95,7 +95,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - PUSH・PULL・merge対象のローカル内容を変更開始前に再検査し、R2一覧も再取得して当初のremote snapshotと比較する。競合が1件でもあれば変更を開始しない
 - 成功した操作ごとに、設定ファイル基準で指定した状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする。Vault内にある設定ファイル、状態ファイル、状態更新用一時ファイルは、Vault走査・R2一覧から強制除外して同期しない
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
-- Node版と同じく、Vault・実行モード、local/remote/state件数、action別の計画と対象パス、取得・検証／適用件数、最終集計、競合・エラーを実行中に表示する。Shortcuts向けJSONを壊さないよう、人向け進捗は標準エラーへ逐次出力し、最終JSONだけを標準出力へ出す
+- Node版と同じく、Vault・実行モード、local/remote/state件数、action別の計画と対象パス、取得・検証／適用件数、最終集計、競合・エラーを実行中に表示する。Shortcuts向けJSONを壊さないよう、人向け進捗は標準エラーへ逐次出力し、最終JSONだけを標準出力へ整形して出す。整形JSONは複数行だが、標準のJSONパーサーでそのまま受け取れる
 - `NOOP`は変更なし件数として表示するだけで、適用計画・適用前再検証・checkpoint更新・適用進捗には含めない。全件`NOOP`の実行結果は`planned=0`かつ`applied=0`とする
 - `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSH・PULL・削除・mergeは成功ごとのcheckpointを維持する
 - `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する

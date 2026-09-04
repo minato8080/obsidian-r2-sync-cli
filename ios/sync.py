@@ -1969,12 +1969,12 @@ def main(argv: list[str] | None = None) -> int:
                 extra_protected_paths=extra_protected_paths, fetch_concurrency=fetch_concurrency, progress=progress,
             )
         _report_result(progress, result)
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 1
     except PullError as error:
         result = {"ok": False, "mode": "apply" if args.apply else "dry-run", "planned": 0, "validated": 0, "applied": 0, "errors": [{"error": str(error)}], "conflicts": [], "timingsMs": {}}
         _report_result(progress, result)
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
 
 

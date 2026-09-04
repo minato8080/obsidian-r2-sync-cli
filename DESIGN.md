@@ -225,7 +225,7 @@ ios/
 
 適用前に全対象のローカル競合を検査し、R2一覧も再取得して最初の一覧snapshotと比較する。競合または取得・復号エラーがある場合、VaultまたはR2への変更は開始しない。適用中に書き込みが失敗した場合は既に成功した対象を状態へcheckpointし、次回は状態とローカル内容を再検査して再開する。mergeはローカルを原子的に置換してからR2へPUTするため、ローカル置換失敗時にremoteだけが更新されることはない。後続のR2 PUTが失敗した場合、stateは更新せず、次回に変更済みローカル内容を再計画する。
 
-Node版と同じく、開始時にVaultとDRY-RUN/APPLYモード、走査後にlocal/remote/state件数、計画確定後にaction種別・件数・対象パス（最大50件）、処理中に取得・検証件数と適用件数、終了時にaction別集計・競合・エラーを表示する。人向け表示は標準エラーへ逐次flushし、機械処理用の最終JSONだけを標準出力へ1行で出す。これによりa-Shellでは進捗を確認でき、Shortcutsは従来どおり標準出力のJSONを受け取れる。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含める。
+Node版と同じく、開始時にVaultとDRY-RUN/APPLYモード、走査後にlocal/remote/state件数、計画確定後にaction種別・件数・対象パス（最大50件）、処理中に取得・検証件数と適用件数、終了時にaction別集計・競合・エラーを表示する。人向け表示は標準エラーへ逐次flushし、機械処理用の最終JSONだけを標準出力へ整形して出す。Python版の整形JSONは複数行だが、Shortcutsは標準JSONとして受け取れる。Node版の処理・出力は変更しない。結果JSONには`ok`、`mode`、`planned`、`applied`、`errors`、`conflicts`、各処理段階の経過時間を含める。
 
 差分判定で得た`NOOP`は`unchanged`として集計・表示するが、実行対象のactionリストから分離する。したがって`NOOP`はローカル再検証、remote snapshot再取得、state checkpoint、適用進捗の分母には入らず、全件`NOOP`なら走査と判定後に`planned=0`、`applied=0`で終了する。
 
