@@ -877,103 +877,27 @@ def execute_probe(
     return result
 
 
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    parts = []
-    index = 0
-    while index < len(pattern):
-        char = pattern[index]
-        if char == "*" and index + 1 < len(pattern) and pattern[index + 1] == "*":
-            if index + 2 < len(pattern) and pattern[index + 2] == "/":
-                parts.append("(?:.*/)?")
-                index += 3
-            else:
-                parts.append(".*")
-                index += 2
-        elif char == "*":
-            parts.append("[^/]*")
-            index += 1
-        elif char == "?":
-            parts.append("[^/]")
-            index += 1
-        elif char == "[":
-            end = pattern.find("]", index + 1)
-            if end == -1 or end == index + 1:
-                parts.append(r"\[")
-                index += 1
-            else:
-                content = pattern[index + 1:end].replace("\\", r"\\")
-                if content.startswith("!"):
-                    content = "^" + content[1:]
-                parts.append(f"[{content}]")
-                index = end + 1
-        else:
-            parts.append(re.escape(char))
-            index += 1
-    return re.compile("^" + "".join(parts) + "$")
-
-
-def _join_ignore_path(base_rel_path: str, pattern: str) -> str:
-    parts = [part.strip("/") for part in (base_rel_path, pattern) if part.strip("/")]
-    return "/".join(parts)
-
-
 def _ignore_matcher(
-    extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+    extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
 ):
-    """Return the gitignore-style glob matcher used by the desktop client."""
-    base_rel_path = base_rel_path.replace("\\", "/").strip("/")
+    """Return a Remotely Save-style regex matcher for vault-relative paths."""
     protected = {path.replace("\\", "/").strip("/") for path in (protected_paths or []) if path}
-    parsed = []
+    patterns = []
     for raw in extra_patterns or []:
         if not isinstance(raw, str):
             continue
-        value = raw.replace("\\", "/").strip()
+        value = raw.strip()
         if not value:
             continue
-        legacy_anchored = value.startswith("./")
-        anchored = legacy_anchored or value.startswith("/")
-        if legacy_anchored:
-            value = value[2:]
-        value = value.lstrip("/")
-        dir_only = value.endswith("/")
-        if dir_only:
-            value = value[:-1]
-        if not value:
-            continue
-        has_slash = "/" in value
-        parsed.append({
-            "pattern": _join_ignore_path(base_rel_path, value) if anchored or has_slash else value,
-            "any_depth": not anchored and not has_slash,
-            "dir_only": dir_only,
-        })
-
-    def glob_matches(pattern: str, value: str) -> bool:
-        return bool(_glob_regex(pattern).match(value))
-
-    def path_prefixes(rel_path: str) -> list[str]:
-        parts = rel_path.split("/")
-        return ["/".join(parts[:index + 1]) for index in range(len(parts))]
-
-    def under_base(rel_path: str) -> bool:
-        return not base_rel_path or rel_path == base_rel_path or rel_path.startswith(base_rel_path + "/")
+        try:
+            patterns.append(re.compile(value))
+        except re.error as error:
+            raise PullError(f"invalid ignoreExtra regex {raw!r}: {error}") from error
 
     def matches_extra(rel_path: str, is_file: bool) -> bool:
-        if not under_base(rel_path):
-            return False
-        for item in parsed:
-            pattern = item["pattern"]
-            if item["any_depth"]:
-                parts = rel_path.split("/")
-                candidates = parts[:-1] if is_file and item["dir_only"] else parts
-                if any(glob_matches(pattern, part) for part in candidates):
-                    return True
-                continue
-            for prefix in path_prefixes(rel_path):
-                if item["dir_only"] and is_file and prefix == rel_path:
-                    continue
-                if glob_matches(pattern, prefix) or (pattern.endswith("/**") and prefix == pattern[:-3]):
-                    return True
-        return False
+        normalized = rel_path.replace("\\", "/").strip("/")
+        candidate = normalized if is_file else normalized + "/"
+        return any(pattern.search(candidate) for pattern in patterns)
 
     def ignored_dir(rel_path: str) -> bool:
         name = rel_path.rsplit("/", 1)[-1]
@@ -1003,10 +927,10 @@ def _ignore_matcher(
 
 
 def _scan_vault(
-    vault: Path, extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
 ) -> dict[str, dict]:
     """Recursively list regular files without following directory symlinks."""
-    ignored_dir, ignored_file = _ignore_matcher(extra_patterns, base_rel_path, protected_paths)
+    ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     result = {}
 
     def walk(directory: Path, rel_dir: str) -> None:
@@ -1058,14 +982,15 @@ def _entry_from_stat(stat: os.stat_result, etag: str | None, data: bytes | None 
 
 
 def _collect_remote_objects(
-    listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None, base_rel_path: str = "", protected_paths: list[str] | None = None
+    listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None,
+    protected_paths: list[str] | None = None
 ) -> tuple[dict[str, dict], list[dict], list[dict]]:
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
     remotes = {}
     ignored = []
     conflicts = []
-    _, ignored_file = _ignore_matcher(extra_patterns, base_rel_path, protected_paths)
+    _, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     for raw in listed:
         if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
             conflicts.append({"path": "<remote-list>", "reason": "R2 LIST returned an invalid object"})
@@ -1232,7 +1157,6 @@ def execute_full(
     remote_prefix: str = "",
     extra_patterns: list[str] | None = None,
     apply: bool = False,
-    ignore_base_rel_path: str = "",
     extra_protected_paths: list[str] | None = None,
     fetch_concurrency: int = 2,
 ) -> dict:
@@ -1244,7 +1168,7 @@ def execute_full(
     protected_paths = [state_rel_path] if state_rel_path else []
     protected_paths.extend(extra_protected_paths or [])
     previous = load_state(state_file)
-    local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
+    local = _scan_vault(vault, extra_patterns, protected_paths)
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
 
@@ -1261,7 +1185,7 @@ def execute_full(
 
     remotes = {}
     ignored_remote = []
-    _, ignored_file = _ignore_matcher(extra_patterns, ignore_base_rel_path, protected_paths)
+    _, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     for raw in listed:
         if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
             return {
@@ -1450,7 +1374,6 @@ def execute_full_sync(
     push: bool = False,
     allow_delete: bool = False,
     merge: bool = False,
-    ignore_base_rel_path: str = "",
     extra_protected_paths: list[str] | None = None,
     text_merge_base_max_bytes: int | None = None,
     recheck_remote_before_apply: bool = True,
@@ -1474,14 +1397,14 @@ def execute_full_sync(
     )
     _emit_progress(progress, "VaultとR2を走査しています...")
     scan_local_started = time.perf_counter()
-    local = _scan_vault(vault, extra_patterns, ignore_base_rel_path, protected_paths)
+    local = _scan_vault(vault, extra_patterns, protected_paths)
     scan_local_ms = round((time.perf_counter() - scan_local_started) * 1000, 2)
     list_remote_started = time.perf_counter()
     listed = list_remote(remote_prefix)
     list_remote_ms = round((time.perf_counter() - list_remote_started) * 1000, 2)
     decode_remote_started = time.perf_counter()
     remotes, ignored_remote, list_conflicts = _collect_remote_objects(
-        listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
+        listed, decoder, remote_prefix, extra_patterns, protected_paths
     )
     decode_remote_ms = round((time.perf_counter() - decode_remote_started) * 1000, 2)
     _emit_progress(
@@ -1496,7 +1419,7 @@ def execute_full_sync(
     # An ignored file can still be present in an old checkpoint.  Filter only
     # ignored paths here: absent non-ignored paths must remain so FORGET and
     # delete planning can observe that both sides disappeared.
-    _, ignored_file = _ignore_matcher(extra_patterns, ignore_base_rel_path, protected_paths)
+    _, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     active_previous = {path: entry for path, entry in previous.items() if not ignored_file(path)}
     all_paths = sorted(set(local) | set(remotes) | set(active_previous))
 
@@ -1732,7 +1655,7 @@ def execute_full_sync(
         try:
             latest_listed = list_remote(remote_prefix)
             latest_remotes, _, latest_conflicts = _collect_remote_objects(
-                latest_listed, decoder, remote_prefix, extra_patterns, ignore_base_rel_path, protected_paths
+                latest_listed, decoder, remote_prefix, extra_patterns, protected_paths
             )
             result["conflicts"].extend(latest_conflicts)
             snapshot_paths = sorted(set(remotes) | set(latest_remotes))
@@ -1855,17 +1778,6 @@ def _remote_key(decoder, remote_prefix: str, rel_path: str) -> str:
     return prefix + encoded
 
 
-def _ignore_base_rel_path(vault_path: str | Path, config_path: Path) -> str:
-    """Return the config directory relative to the vault, or empty for legacy external configs."""
-    vault = Path(vault_path).expanduser().resolve()
-    base = config_path.expanduser().resolve().parent
-    try:
-        relative = base.relative_to(vault).as_posix()
-        return "" if relative == "." else relative
-    except ValueError:
-        return ""
-
-
 def _config_relative_path(value: str | Path, config_path: Path) -> Path:
     path = Path(value).expanduser()
     if path.is_absolute():
@@ -1926,7 +1838,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config_path = Path(args.config).expanduser().resolve()
         config = _load_config(config_path)
-        ignore_base_rel_path = _ignore_base_rel_path(config["vaultPath"], config_path)
         state_path = _config_relative_path(config["statePath"], config_path)
         config_rel_path = _state_rel_path(Path(config["vaultPath"]).expanduser().resolve(), config_path)
         extra_protected_paths = [config_rel_path] if config_rel_path else []
@@ -1950,7 +1861,7 @@ def main(argv: list[str] | None = None) -> int:
             result = execute_full_sync(
                 config["vaultPath"], state_path, r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
                 remote_prefix=prefix, extra_patterns=config.get("ignoreExtra", []), apply=args.apply,
-                push=True, allow_delete=args.allow_delete, merge=True, ignore_base_rel_path=ignore_base_rel_path,
+                push=True, allow_delete=args.allow_delete, merge=True,
                 extra_protected_paths=extra_protected_paths,
                 text_merge_base_max_bytes=config.get("textMergeBaseMaxBytes"),
                 recheck_remote_before_apply=config.get("recheckRemoteBeforeApply", True),
