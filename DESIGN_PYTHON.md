@@ -13,6 +13,7 @@ py/
 ├── sync.py                 # 薄いCLI entrypoint
 ├── config.example.json     # placeholderだけの設定例
 └── r2sync/
+    ├── __init__.py         # package共有例外
     ├── cli.py              # CLI解析、表示、依存の組立て
     ├── config.py           # JSON設定の読込・検証・パス解決
     ├── crypto.py           # rclone-base64名前/内容暗号

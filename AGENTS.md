@@ -4,8 +4,8 @@
 
 ## 配置の境界
 
-- 要件定義は `REQUIREMENTS.md`、設計は `DESIGN.md` に保存する
-- ソースは `src/`、iOS版ソースは `ios/` に置く
+- 要件定義は `REQUIREMENTS.md`、共通設計は `DESIGN.md`、実装別設計は `DESIGN_NODE.md` と `DESIGN_PYTHON.md` に保存する
+- Node.js版ソースは `src/`、iOS/a-Shell向けPython版ソースは `py/` に置く
 - 利用者環境のVault内にある生成済みバンドル配置先は、正本ではない
 - 利用者固有のVaultパス、ショートカット、ログ、設定は利用者側で管理する
 
@@ -40,7 +40,7 @@ pre-commit hookは上記のうち機械的に判定できる項目と `npm test`
 
 1. 仕様変更は `REQUIREMENTS.md` を先に更新する
 2. 構成変更は `DESIGN.md` を更新する
-3. 実装は `src/` または `ios/` で行う
+3. 実装は `src/` または `py/` で行う
 4. Node.js版は `npm test` を実行する
 5. 配布が必要な場合だけ `npm run build` でバンドルを生成する
 6. 公開前に個人情報・秘密情報・環境固有パス・未整理のログが混入していないか確認する
@@ -55,6 +55,6 @@ pre-commit hookは上記のうち機械的に判定できる項目と `npm test`
 ## iOS版の運用
 
 - 初期版はiOSショートカット → a-Shell `In App` → PythonのPULL専用
-- iOS用スクリプトは本PJからiPhone側の実行領域へデプロイし、Shortcutsのブックマークで参照する
+- iOS用の `py/sync.py` と `py/r2sync/` は本PJからiPhone側の実行領域へ一緒にデプロイし、Shortcutsのブックマークで参照する
 - iOSはVault全走査・R2全列挙を行う現行互換モードから開始する
 - 5秒目標は直接ファイル置換完了までで、Obsidianの反映時間とは分けて計測する

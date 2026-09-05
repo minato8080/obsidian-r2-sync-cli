@@ -1,10 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createCipher } from "./src/crypto.js";
-import { createIgnoreMatcher } from "./src/ignore.js";
-import { listLocalFiles } from "./src/localFiles.js";
-import { planSync, applyActions } from "./src/sync.js";
+import { createCipher } from "../../src/crypto.js";
+import { createIgnoreMatcher } from "../../src/ignore.js";
+import { listLocalFiles } from "../../src/localFiles.js";
+import { planSync, applyActions } from "../../src/sync.js";
 
 const vaultPath = await fs.mkdtemp(path.join(os.tmpdir(), "r2sync-test-"));
 console.log("test vault:", vaultPath);

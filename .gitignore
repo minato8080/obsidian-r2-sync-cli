@@ -5,3 +5,5 @@ dist/
 r2-sync-config.json
 r2-sync-state.json
 *.log
+__pycache__/
+*.py[cod]

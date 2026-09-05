@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createIgnoreMatcher } from "./src/ignore.js";
+import { createIgnoreMatcher } from "../../src/ignore.js";
 
 const anchored = createIgnoreMatcher(["/sync.py", "/r2-sync-config.json", "/generated/"] , { baseRelPath: "tools" });
 assert.equal(anchored.isIgnoredFile("tools/sync.py"), true);
@@ -47,7 +47,7 @@ assert.equal(rootBased.isIgnoredFile("note.md"), true);
 
 const smokeRoot = mkdtempSync(path.join(os.tmpdir(), "r2-sync-index-smoke-"));
 try {
-  const indexPath = fileURLToPath(new URL("./src/index.js", import.meta.url));
+  const indexPath = fileURLToPath(new URL("../../src/index.js", import.meta.url));
   const smoke = spawnSync(process.execPath, [indexPath], {
     cwd: smokeRoot,
     env: {
