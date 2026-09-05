@@ -334,7 +334,7 @@ class LocalAndCheckpointTests(unittest.TestCase):
                 self.assertEqual(config.read_text(encoding="utf-8"), "local config")
                 self.assertEqual(remote.objects["tools/config.json"].data, b"remote config")
 
-    def test_state_path_is_config_relative_with_legacy_existing_fallback(self):
+    def test_state_path_is_always_config_relative(self):
             with tempfile.TemporaryDirectory() as root:
                 root_path = Path(root)
                 config = root_path / "tools" / "config.json"
@@ -345,9 +345,9 @@ class LocalAndCheckpointTests(unittest.TestCase):
                 previous_cwd = Path.cwd()
                 try:
                     os.chdir(root_path)
-                    legacy = root_path / "legacy-state.json"
-                    legacy.write_text("{}", encoding="utf-8")
-                    self.assertEqual(_config_relative_path("legacy-state.json", config), legacy.resolve())
+                    cwd_state = root_path / "state.json"
+                    cwd_state.write_text("{}", encoding="utf-8")
+                    self.assertEqual(_config_relative_path("state.json", config), expected.resolve())
                 finally:
                     os.chdir(previous_cwd)
 

@@ -225,10 +225,7 @@ def _ignore_matcher(
         value = unicodedata.normalize("NFC", raw.replace("\\", "/").strip())
         if not value:
             continue
-        legacy_anchored = value.startswith("./")
-        anchored = legacy_anchored or value.startswith("/")
-        if legacy_anchored:
-            value = value[2:]
+        anchored = value.startswith("/")
         value = value.lstrip("/")
         dir_only = value.endswith("/")
         if dir_only:

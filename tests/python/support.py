@@ -32,7 +32,7 @@ from r2sync.crypto import (
     _poly1305,
     _xsalsa_stream,
 )
-from r2sync.executor import execute_full, execute_full_sync, execute_probe
+from r2sync.executor import execute_full_sync, execute_probe
 from r2sync.local import _ignore_matcher, _scan_vault
 from r2sync.remote import R2Client, RemoteObject
 

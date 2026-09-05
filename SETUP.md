@@ -91,7 +91,7 @@ node dist/r2-sync.bundle.cjs --apply
 
 ## iOS full sync
 
-Python版は `py/sync.py`、`py/r2sync/`、設定JSON・状態JSONをa-Shellから参照できる場所へ配置する。状態JSONは設定JSONと同じフォルダを基準に相対指定でき、設定JSON・状態JSON・状態更新用一時ファイルは同期処理が自動的に同期対象外として扱う。旧版でCWD基準の相対`statePath`に既存stateがある場合はその場所を互換利用し、新規指定は設定JSON基準になる。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。配置例は `DESIGN_PYTHON.md` を参照する。
+Python版は `py/sync.py`、`py/r2sync/`、設定JSON・状態JSONをa-Shellから参照できる場所へ配置する。相対`statePath`は設定JSONと同じフォルダを基準とし、設定JSON・状態JSON・状態更新用一時ファイルは同期処理が自動的に同期対象外として扱う。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。配置例は `DESIGN_PYTHON.md` を参照する。
 
 Shortcuts の「Run a-Shell script」または a-Shell In App から、次の形で実行する。
 
@@ -118,7 +118,7 @@ just check-ignore-path <config-path> <vault-relative-path>
 
 通常の`check-ignore`はディレクトリ全体の除外をまとめ、`INCLUDE`は除外対象を含まない最上位のサブツリー単位でまとめる。除外対象と混在するフォルダだけ下位へ展開し、`.env`など個別に除外されたファイルはパスを表示する。件数と集約注記は英語で表示する。`check-ignore-verbose`は除外ディレクトリ配下を含む全パスを表示する。`check-ignore-path`は指定パスが除外対象なら`IGNORE`と終了コード0、同期対象なら`INCLUDE`と終了コード1を返す。
 
-full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
+full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`は必須で、`probe`では`files`に指定した1〜2個だけをPULL対象にする。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 
 同じ端末・同じ利用者から同一Vaultへ`sync.py`を重ねて起動した場合、後から起動した処理はR2へ接続せず、`another sync is already running for this vault`エラーで即時終了する。ロック待機はせず、強制終了後も次回実行を妨げない。Node版や別端末との排他ロックではないため、複数の同期クライアントを使う場合は従来どおり実行タイミングを分ける。
 

@@ -90,10 +90,6 @@ def main(argv: list[str] | None = None) -> int:
         help="check ignored vault-relative paths locally; omit PATH to list ignored vault entries",
     )
     parser.add_argument("--verbose", action="store_true", help="show every path in --check-ignore mode")
-    # Kept hidden so an already-installed Shortcut can be migrated separately.
-    parser.add_argument("--full", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--push", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--merge", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     progress = lambda message: print(message, file=sys.stderr, flush=True)
     run_lock = None
@@ -158,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         prefix = str(config.get("remotePrefix", "")).replace("\\", "/").strip("/")
         prefix = prefix + "/" if prefix else ""
-        full = args.full or config.get("mode") == "full"
+        full = config["mode"] == "full"
         progress(f"vault: {config['vaultPath']}")
         progress(f"mode: {'APPLY (削除含む)' if args.apply and args.allow_delete else 'APPLY (削除は警告のみ)' if args.apply else 'DRY-RUN'}")
         progress(f"fetch concurrency: {fetch_concurrency} / request timeout: {request_timeout}秒")

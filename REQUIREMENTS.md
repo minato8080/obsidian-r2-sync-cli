@@ -85,7 +85,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 ### Python full sync の実装範囲
 
-- `py/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの薄い実行点とし、`python sync.py ...`というentrypoint名を維持する
+- `py/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの薄い実行点とする
 - Python実装はCLI/config、暗号、local filesystem、checkpoint、R2、pureな同期計画、mutation適用の責務へ分割し、循環importと無秩序な共通moduleを作らない
 - CLI entrypointは引数解析とorchestrationに限定し、同期判定とI/O実装を各責務moduleへ置く
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
@@ -114,7 +114,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Python版はR2一覧の復号後、ローカル走査に存在しない同期対象パスをVault上で直接再解決する。Files Providerの遅延列挙やUnicode表現差により既存ファイルを発見した場合はローカル走査結果へ補完し、新規PULLではなく既存ファイルとして内容比較する。補完件数を進捗と結果JSONへ表示する
 - Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
-- 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
+- `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
 
 ## 関連
 

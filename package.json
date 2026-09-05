@@ -15,7 +15,6 @@
     "test": "npm run test:node && npm run test:python",
     "test:node": "node tests/node/test-ignore.mjs && node tests/node/test-sync.mjs",
     "test:python": "python -m unittest discover -s tests/python -p \"test_*.py\"",
-    "test:ios": "npm run test:python",
     "build": "esbuild src/index.js --bundle --minify --platform=node --target=node18 --format=cjs --outfile=dist/r2-sync.bundle.cjs"
   },
   "dependencies": {

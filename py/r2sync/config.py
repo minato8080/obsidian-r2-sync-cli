@@ -15,11 +15,7 @@ def _config_relative_path(value: str | Path, config_path: Path) -> Path:
     path = Path(value).expanduser()
     if path.is_absolute():
         return path.resolve()
-    config_relative = (config_path.parent / path).resolve()
-    legacy_cwd_relative = path.resolve()
-    if config_relative != legacy_cwd_relative and not config_relative.exists() and legacy_cwd_relative.exists():
-        return legacy_cwd_relative
-    return config_relative
+    return (config_path.parent / path).resolve()
 
 
 def _load_config(path: Path) -> dict:
@@ -30,11 +26,11 @@ def _load_config(path: Path) -> dict:
         raise PullError(f"cannot read config: {path}") from error
     if not isinstance(config, dict):
         raise PullError("config root must be an object")
-    required = ("vaultPath", "statePath", "endpoint", "bucket", "accessKeyId", "secretAccessKey")
+    required = ("vaultPath", "statePath", "endpoint", "bucket", "accessKeyId", "secretAccessKey", "mode")
     missing = [key for key in required if not config.get(key)]
     if missing:
         raise PullError("config is missing: " + ", ".join(missing))
-    mode = config.get("mode", "probe")
+    mode = config["mode"]
     if mode not in ("probe", "full"):
         raise PullError("mode must be probe or full")
     if mode == "probe" and not isinstance(config.get("files"), list):

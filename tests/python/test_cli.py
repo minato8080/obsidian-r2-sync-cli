@@ -339,6 +339,28 @@ class CliTests(unittest.TestCase):
                     with self.assertRaises(Exception):
                         config_module._load_config(config)
 
+    def test_config_requires_explicit_mode(self):
+            with tempfile.TemporaryDirectory() as root:
+                config = Path(root) / "config.json"
+                config.write_text(json.dumps({
+                    "vaultPath": str(Path(root) / "vault"),
+                    "statePath": "state.json",
+                    "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+                    "bucket": "<bucket-name>",
+                    "accessKeyId": "key",
+                    "secretAccessKey": "secret",
+                }), encoding="utf-8")
+
+                with self.assertRaisesRegex(PullError, "config is missing: mode"):
+                    config_module._load_config(config)
+
+    def test_removed_hidden_cli_flags_are_rejected(self):
+            for option in ("--full", "--push", "--merge"):
+                with self.subTest(option=option):
+                    with redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            cli_module.main(["--config", "config.json", option])
+
     def test_fetch_concurrency_one_avoids_executor_and_reports_each_completion(self):
             completed = []
             with mock.patch.object(remote_module.concurrent.futures, "ThreadPoolExecutor") as pool_type:

@@ -31,7 +31,7 @@ tests/python/
 └── test_sync.py
 ```
 
-`python py/sync.py ...`をrepository上の実行形式とする。配布時も`sync.py`と`r2sync/`を同じ階層へ配置し、`python sync.py ...`というentrypoint名を維持する。
+`python py/sync.py ...`をrepository上の実行形式とする。配布時も`sync.py`と`r2sync/`を同じ階層へ配置する。
 
 ## 依存方向
 
@@ -46,13 +46,13 @@ planner → 標準ライブラリのみ
 
 `planner`はfilesystem、checkpoint、HTTPへ依存させない。`local`と`checkpoint`もR2へ依存させない。共有例外はpackage rootで定義し、下位module間の循環を避ける。
 
-## 設定とCLI互換性
+## 設定とCLI
 
 設定JSONのkey、default、validationは既存形式を維持する。主要項目は`vaultPath`、`statePath`、R2接続情報、`password`、`mode`、`remotePrefix`、`files`、`ignoreExtra`、`fetchConcurrency`、`requestTimeoutSeconds`、`unicodeCollisionPolicy`、`textMergeBaseMaxBytes`、`recheckRemoteBeforeApply`である。
 
-相対`statePath`は設定JSONのdirectoryを基準とする。旧版がcurrent directory基準で作った既存stateがある場合のfallbackも維持する。
+`mode`は必須とし、`full`または`probe`を指定する。相対`statePath`は設定JSONのdirectoryだけを基準とする。
 
-`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`と、移行用のhidden optionを維持する。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
+CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`とする。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
 
 ## 暗号化とR2
 
