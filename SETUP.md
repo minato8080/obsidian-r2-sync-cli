@@ -124,6 +124,8 @@ full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動merge�
 
 実行中はNode版と同じ形式で、Vault・モード、走査件数、action別計画と対象パス、取得・検証／適用進捗、最終結果がa-Shellへ表示される。対象パスはNOOP、PUSH、PULLなどのaction種別ごとに20件まで表示し、残りは省略件数だけを表示する。人向け進捗は標準エラー、Shortcutsが受け取る整形済み最終JSONは標準出力へ分離して出力される。JSONは複数行だが、Shortcuts側では通常どおりJSONとして解析できる。
 
+除外ルールへ一致したremote objectは、人向け結果の`ignoredRemoteObjects`件数と最終JSONの総数・省略数だけで確認する。通常の除外パスは最終JSONへ1件ずつ展開しない。ファイル名を復号できないobjectなど調査が必要な詳細だけを最大20件表示する。
+
 stateが添付ファイルのmerge baseで大きくなる場合は、設定へ`"textMergeBaseMaxBytes": 1048576`を追加すると、1MiB以下のUTF-8テキストだけbaseを保持する。画像・PDF・大容量テキストなどbaseを保持しないファイルが両側変更された場合は、上書きせず競合停止する。未指定では従来どおり全内容を保持する。
 
 適用直前のR2再一覧は既定で有効である。同期中に他クライアントがR2を変更しないことを手動運用で保証できる場合に限り、`"recheckRemoteBeforeApply": false`で省略できる。省略時は競合更新を直前検出できないため、通常は`true`のまま使う。

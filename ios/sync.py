@@ -40,6 +40,7 @@ BLOCK_DATA_SIZE = 64 * 1024
 BLOCK_TAG_SIZE = 16
 HEADER_SIZE = len(MAGIC) + 24
 ACTION_PATH_DISPLAY_LIMIT = 20
+REMOTE_OBJECT_DETAIL_LIMIT = 20
 
 
 def _sync_lock_path(vault: Path) -> Path:
@@ -127,6 +128,9 @@ def _report_result(progress, result: dict) -> None:
     ):
         if name in result:
             _emit_progress(progress, f"{name}: {result[name]}")
+    ignored_remote_objects = result.get("ignoredRemoteObjects", [])
+    if ignored_remote_objects:
+        _emit_progress(progress, f"ignoredRemoteObjects: {len(ignored_remote_objects)}")
     for action_type, count in result.get("appliedByType", {}).items():
         _emit_progress(progress, f"{action_type}: {count}")
     for action_type, count in result.get("skippedByType", {}).items():
@@ -141,6 +145,26 @@ def _report_result(progress, result: dict) -> None:
         _emit_progress(progress, f"\nエラー: {len(errors)}件")
         for error in errors[:50]:
             _emit_progress(progress, f"  {error.get('path', '<unknown>')}: {error.get('error', 'error')}")
+
+
+def _result_for_json(result: dict) -> dict:
+    """Compact routine ignored-remote details without mutating the sync result."""
+    ignored_remote_objects = result.get("ignoredRemoteObjects")
+    if not isinstance(ignored_remote_objects, list):
+        return result
+    details = [
+        item for item in ignored_remote_objects
+        if not isinstance(item, dict) or item.get("reason") != "ignored"
+    ][:REMOTE_OBJECT_DETAIL_LIMIT]
+    output = {}
+    for name, value in result.items():
+        if name == "ignoredRemoteObjects":
+            output[name] = details
+            output["ignoredRemoteObjectsTotal"] = len(ignored_remote_objects)
+            output["ignoredRemoteObjectsOmitted"] = len(ignored_remote_objects) - len(details)
+        else:
+            output[name] = value
+    return output
 
 
 class PullError(Exception):
@@ -2126,12 +2150,12 @@ def main(argv: list[str] | None = None) -> int:
                 extra_protected_paths=extra_protected_paths, fetch_concurrency=fetch_concurrency, progress=progress,
             )
         _report_result(progress, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(_result_for_json(result), ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 1
     except PullError as error:
         result = {"ok": False, "mode": "apply" if args.apply else "dry-run", "planned": 0, "validated": 0, "applied": 0, "errors": [{"error": str(error)}], "conflicts": [], "timingsMs": {}}
         _report_result(progress, result)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(_result_for_json(result), ensure_ascii=False, indent=2))
         return 1
     finally:
         if run_lock is not None:

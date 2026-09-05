@@ -179,6 +179,28 @@ class PullProbeTests(unittest.TestCase):
         self.assertNotIn("  note-20.md", rendered)
         self.assertIn("  ...ほか5件", rendered)
 
+    def test_result_json_summarizes_routine_ignored_remote_objects(self):
+        ignored = [
+            {"key": f"encoded-{index}", "path": f"ignored/{index}.md", "reason": "ignored"}
+            for index in range(25)
+        ]
+        ignored.extend({
+            "key": f"broken-{index}", "reason": "cannot decode object path: invalid name"
+        } for index in range(22))
+        result = {"ok": True, "ignoredRemoteObjects": ignored, "errors": []}
+        messages = []
+
+        output = pull_module._result_for_json(result)
+        _report_result(messages.append, result)
+
+        self.assertIsNot(output, result)
+        self.assertEqual(len(result["ignoredRemoteObjects"]), 47)
+        self.assertEqual(output["ignoredRemoteObjectsTotal"], 47)
+        self.assertEqual(output["ignoredRemoteObjectsOmitted"], 27)
+        self.assertEqual(len(output["ignoredRemoteObjects"]), 20)
+        self.assertTrue(all(item["reason"].startswith("cannot decode") for item in output["ignoredRemoteObjects"]))
+        self.assertIn("ignoredRemoteObjects: 47", messages)
+
     def test_full_sync_batches_seed_only_state_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"
