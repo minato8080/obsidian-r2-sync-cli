@@ -116,7 +116,7 @@ just check-ignore-verbose <config-path>
 just check-ignore-path <config-path> <vault-relative-path>
 ```
 
-通常の`check-ignore`はディレクトリ全体の除外と`INCLUDE`をフォルダ単位でまとめるが、`.env`など個別に除外されたファイルはパスを表示する。`check-ignore-verbose`は除外ディレクトリ配下を含む全パスを表示する。`check-ignore-path`は指定パスが除外対象なら`IGNORE`と終了コード0、同期対象なら`INCLUDE`と終了コード1を返す。
+通常の`check-ignore`はディレクトリ全体の除外をまとめ、`INCLUDE`は除外対象を含まない最上位のサブツリー単位でまとめる。除外対象と混在するフォルダだけ下位へ展開し、`.env`など個別に除外されたファイルはパスを表示する。件数と集約注記は英語で表示する。`check-ignore-verbose`は除外ディレクトリ配下を含む全パスを表示する。`check-ignore-path`は指定パスが除外対象なら`IGNORE`と終了コード0、同期対象なら`INCLUDE`と終了コード1を返す。
 
 full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 

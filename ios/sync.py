@@ -1059,14 +1059,46 @@ def _classify_vault_paths(
     return ignored_paths, included_paths
 
 
-def _group_paths_by_parent(paths: list[str]) -> list[tuple[str, int]]:
-    """Group files by their immediate parent directory."""
-    groups: dict[str, int] = {}
-    for rel_path in paths:
-        parent = PurePosixPath(rel_path).parent.as_posix()
-        label = "./" if parent == "." else parent + "/"
-        groups[label] = groups.get(label, 0) + 1
-    return sorted(groups.items())
+def _format_count(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun if count == 1 else plural or noun + 's'}"
+
+
+def _summarize_included_paths(
+    included_paths: list[str], ignored_paths: list[str],
+) -> list[tuple[str, int | None]]:
+    """Collapse each highest directory whose entire visible subtree is included."""
+    direct_files: dict[str, list[str]] = {}
+    child_dirs: dict[str, set[str]] = {}
+    included_counts: dict[str, int] = {}
+    blocked_dirs: set[str] = set()
+
+    for rel_path in included_paths:
+        parts = PurePosixPath(rel_path).parts
+        parent = "/".join(parts[:-1])
+        direct_files.setdefault(parent, []).append(rel_path)
+        for index in range(1, len(parts)):
+            directory = "/".join(parts[:index])
+            directory_parent = "/".join(parts[:index - 1])
+            child_dirs.setdefault(directory_parent, set()).add(directory)
+            included_counts[directory] = included_counts.get(directory, 0) + 1
+
+    for rel_path in ignored_paths:
+        parts = PurePosixPath(rel_path.rstrip("/")).parts
+        for index in range(1, len(parts) + 1):
+            blocked_dirs.add("/".join(parts[:index]))
+
+    summary: list[tuple[str, int | None]] = []
+
+    def emit(directory: str) -> None:
+        summary.extend((rel_path, None) for rel_path in direct_files.get(directory, []))
+        for child in child_dirs.get(directory, set()):
+            if child not in blocked_dirs:
+                summary.append((child + "/", included_counts[child]))
+            else:
+                emit(child)
+
+    emit("")
+    return sorted(summary, key=lambda item: item[0])
 
 
 def _remote_mtime_ms(remote: RemoteObject, listed: dict) -> float:
@@ -1962,7 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.check_ignore is not None:
             print("=== 除外判定（ローカルのみ / R2通信なし）===")
             print(f"vault: {vault_path}")
-            print(f"ignoreExtra: {len(config.get('ignoreExtra', []))}件")
+            print(f"ignoreExtra: {_format_count(len(config.get('ignoreExtra', [])), 'pattern')}")
             if args.check_ignore:
                 ignored_dir, ignored_file = _ignore_matcher(config.get("ignoreExtra", []), protected_paths)
                 all_ignored = True
@@ -1978,20 +2010,21 @@ def main(argv: list[str] | None = None) -> int:
             ignored_paths, included_paths = _classify_vault_paths(
                 vault_path, config.get("ignoreExtra", []), protected_paths, verbose=args.verbose
             )
-            print(f"\n[IGNORE] {len(ignored_paths)}件")
+            print(f"\n[IGNORE] {_format_count(len(ignored_paths), 'entry', 'entries')}")
             if args.verbose:
                 for rel_path in ignored_paths:
                     print(f"  {rel_path}")
             else:
                 for rel_path in ignored_paths:
-                    print(f"  {rel_path}{' (配下すべて)' if rel_path.endswith('/') else ''}")
-            print(f"\n[INCLUDE] {len(included_paths)}件")
+                    print(f"  {rel_path}{' (all files)' if rel_path.endswith('/') else ''}")
+            print(f"\n[INCLUDE] {_format_count(len(included_paths), 'file')}")
             if args.verbose:
                 for rel_path in included_paths:
                     print(f"  {rel_path}")
             else:
-                for folder, count in _group_paths_by_parent(included_paths):
-                    print(f"  {folder} ({count}件)")
+                for rel_path, count in _summarize_included_paths(included_paths, ignored_paths):
+                    suffix = f" ({_format_count(count, 'file')})" if count is not None else ""
+                    print(f"  {rel_path}{suffix}")
             return 0
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):
