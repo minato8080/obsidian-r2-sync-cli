@@ -385,13 +385,15 @@ class PullProbeTests(unittest.TestCase):
                     ])
 
             self.assertEqual(list_exit, 0)
-            self.assertIn("[IGNORED] ignored/", listed_stdout.getvalue())
-            self.assertIn("[IGNORED] .env", listed_stdout.getvalue())
-            self.assertIn("[IGNORED] state.json", listed_stdout.getvalue())
-            self.assertNotIn("keep.txt", listed_stdout.getvalue())
+            self.assertIn("[IGNORE] 3件", listed_stdout.getvalue())
+            self.assertIn("  ignored/", listed_stdout.getvalue())
+            self.assertIn("  .env", listed_stdout.getvalue())
+            self.assertIn("  state.json", listed_stdout.getvalue())
+            self.assertIn("[INCLUDE] 1件", listed_stdout.getvalue())
+            self.assertIn("  keep.txt", listed_stdout.getvalue())
             self.assertEqual(check_exit, 1)
-            self.assertIn("[IGNORED] ignored/file.txt", checked_stdout.getvalue())
-            self.assertIn("[INCLUDED] keep.txt", checked_stdout.getvalue())
+            self.assertIn("[IGNORE] ignored/file.txt", checked_stdout.getvalue())
+            self.assertIn("[INCLUDE] keep.txt", checked_stdout.getvalue())
             self.assertFalse(state.exists())
 
     def test_config_rejects_unsafe_performance_option_types(self):

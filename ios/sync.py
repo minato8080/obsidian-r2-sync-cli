@@ -1026,12 +1026,13 @@ def _scan_vault(
     return result
 
 
-def _list_ignored_paths(
+def _classify_vault_paths(
     vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
-) -> list[str]:
-    """List paths excluded by the sync matcher without changing the vault."""
+) -> tuple[list[str], list[str]]:
+    """Classify local paths with the sync matcher without changing the vault."""
     ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
-    result = []
+    ignored_paths = []
+    included_paths = []
 
     def walk(directory: Path, rel_dir: str) -> None:
         try:
@@ -1042,16 +1043,16 @@ def _list_ignored_paths(
             rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
             if entry.is_dir(follow_symlinks=False):
                 if ignored_dir(rel_path):
-                    result.append(rel_path + "/")
+                    ignored_paths.append(rel_path + "/")
                 else:
                     walk(Path(entry.path), rel_path)
-            elif entry.is_file(follow_symlinks=False) and ignored_file(rel_path):
-                result.append(rel_path)
+            elif entry.is_file(follow_symlinks=False):
+                (ignored_paths if ignored_file(rel_path) else included_paths).append(rel_path)
 
     if not vault.exists() or not vault.is_dir():
         raise PullError("vaultPath must be an existing directory")
     walk(vault, "")
-    return result
+    return ignored_paths, included_paths
 
 
 def _remote_mtime_ms(remote: RemoteObject, listed: dict) -> float:
@@ -1956,13 +1957,18 @@ def main(argv: list[str] | None = None) -> int:
                     target = _vault_path(vault_path, rel_path)
                     is_dir = is_dir or target.is_dir()
                     ignored = ignored_dir(rel_path) if is_dir else ignored_file(rel_path)
-                    print(f"[{'IGNORED' if ignored else 'INCLUDED'}] {rel_path}{'/' if is_dir else ''}")
+                    print(f"[{'IGNORE' if ignored else 'INCLUDE'}] {rel_path}{'/' if is_dir else ''}")
                     all_ignored = all_ignored and ignored
                 return 0 if all_ignored else 1
-            ignored_paths = _list_ignored_paths(vault_path, config.get("ignoreExtra", []), protected_paths)
+            ignored_paths, included_paths = _classify_vault_paths(
+                vault_path, config.get("ignoreExtra", []), protected_paths
+            )
+            print(f"\n[IGNORE] {len(ignored_paths)}件")
             for rel_path in ignored_paths:
-                print(f"[IGNORED] {rel_path}")
-            print(f"ignored: {len(ignored_paths)}件")
+                print(f"  {rel_path}")
+            print(f"\n[INCLUDE] {len(included_paths)}件")
+            for rel_path in included_paths:
+                print(f"  {rel_path}")
             return 0
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):

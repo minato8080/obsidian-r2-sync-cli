@@ -108,14 +108,14 @@ python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-co
 python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --allow-delete --apply
 ```
 
-R2へ接続せず、ローカルの除外結果だけを確認するには次を実行する。1つ目はVault内の除外対象一覧、2つ目は指定したVault相対パス1件の判定を表示する。
+R2へ接続せず、ローカルの除外結果だけを確認するには次を実行する。1つ目はVault内の`IGNORE`と`INCLUDE`（同期対象候補）の両一覧、2つ目は指定したVault相対パス1件の判定を標準出力へ表示する。R2未照合のため`INCLUDE`はPUSH確定を意味しない。
 
 ```powershell
 just check-ignore <config-path>
 just check-ignore-path <config-path> <vault-relative-path>
 ```
 
-`check-ignore-path`は指定パスが除外対象なら終了コード0、同期対象なら`INCLUDED`を表示して1を返す。
+`check-ignore-path`は指定パスが除外対象なら`IGNORE`と終了コード0、同期対象なら`INCLUDE`と終了コード1を返す。
 
 full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 
