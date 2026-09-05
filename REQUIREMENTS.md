@@ -8,6 +8,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 - 本書と設計書は本リポジトリのルートに置く
 - ソースコード、テスト、設定テンプレートも本PJで管理する
+- Node.js版ソースは`src/`、Python版ソースは`py/`、テストは`tests/node/`と`tests/python/`へ実装別に配置する
 - 利用者環境のVault内にある生成済みバンドル配置先は、要件・設計・ソースの管理場所にしない
 - 本リポジトリの実装変更後、必要な場合だけ `npm run build` でバンドルを生成し、利用者が指定する配布先へ配置する
 - 実値の `.env`、アクセスキー、パスワード、個人用パスはコミット・バンドル・Vaultへ含めない
@@ -82,9 +83,11 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 4. 暗号化互換と失敗系を検証（継続）
 5. 複数ファイル、PUSH、削除、競合処理を必要性に応じて拡張
 
-### iOS full sync の初回実装範囲
+### Python full sync の実装範囲
 
-- `ios/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの実行点とする
+- `py/sync.py` は、Shortcuts から a-Shell の Python を呼び出すための依存パッケージなしの薄い実行点とし、`python sync.py ...`というentrypoint名を維持する
+- Python実装はCLI/config、暗号、local filesystem、checkpoint、R2、pureな同期計画、mutation適用の責務へ分割し、循環importと無秩序な共通moduleを作らない
+- CLI entrypointは引数解析とorchestrationに限定し、同期判定とI/O実装を各責務moduleへ置く
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
 - R2取得・内容確認は`fetchConcurrency`の指定数、Vault書き込みとR2変更は1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
 - Python版の`ignoreExtra`はVaultルートからの相対パス（区切りは`/`）へ適用するGitignore風globの配列とする。`foo/bar/**`はVault直下の対象ディレクトリと配下、`**/.env`はVault全階層の`.env`、`.git`のようにスラッシュを含まないパターンは全階層の同名要素に一致する。ローカル走査と復号後のR2一覧へ同じ判定を適用する。Node版の`IGNORE_EXTRA`は既存のconfigディレクトリ基準を維持する
@@ -115,5 +118,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 
 ## 関連
 
-- 設計: [DESIGN.md](DESIGN.md)
+- 共通設計: [DESIGN.md](DESIGN.md)
+- Node.js版設計: [DESIGN_NODE.md](DESIGN_NODE.md)
+- Python版設計: [DESIGN_PYTHON.md](DESIGN_PYTHON.md)
 - 調査知識: 利用者固有の調査結果は本リポジトリ外で管理する

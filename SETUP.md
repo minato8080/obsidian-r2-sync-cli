@@ -48,7 +48,7 @@ npm test
 | `DELETE_REMOTE` / `DELETE_LOCAL` | リモート/ローカルからの削除。`--allow-delete` が無いと実行されない |
 | `SKIPPED_DELETE_REMOTE` / `SKIPPED_DELETE_LOCAL` | 削除が計画されたが `--allow-delete` が無いためスキップ（警告のみ、次回また同じ計画が出る） |
 
-`PUSH`/`PULL`には`reason`が付くことがある（例:「両側変更・ローカルの方が新しいため上書き」「リモート削除だがローカルは編集済み: 編集を優先」）。両側変更時の判定方法は`DESIGN.md`の「同期アルゴリズム」参照。
+`PUSH`/`PULL`には`reason`が付くことがある（例:「両側変更・ローカルの方が新しいため上書き」「リモート削除だがローカルは編集済み: 編集を優先」）。両側変更時の判定方法は`DESIGN_NODE.md`の「同期判定」参照。
 
 `SEED`ばかりでなく大量の`PUSH`/`PULL`が「不一致による上書き」reason付きで出る場合は `SYNC_PASSWORD` や `R2_REMOTE_PREFIX` の設定が間違っている可能性が高い（暗号化キーが合わずファイル名/内容が正しく復号できていない）。**この場合は `--apply` を実行しないこと。**
 
@@ -87,25 +87,25 @@ node dist/r2-sync.bundle.cjs               # dry-run
 node dist/r2-sync.bundle.cjs --apply
 ```
 
-`.env` はプロジェクト直下（実行時のカレントディレクトリ）から読まれるので、`dist/r2-sync.bundle.cjs` をプロジェクト外に持ち出す場合は `.env` と `.sync-state.json` も同じディレクトリに置くこと。詳細は `DESIGN.md` の「単体実行用バンドル」参照。
+`.env` はプロジェクト直下（実行時のカレントディレクトリ）から読まれるので、`dist/r2-sync.bundle.cjs` をプロジェクト外に持ち出す場合は `.env` と `.sync-state.json` も同じディレクトリに置くこと。詳細は `DESIGN_NODE.md` の「実行と配布」参照。
 
 ## iOS full sync
 
-iOS版は `ios/sync.py` と設定JSON・状態JSONをVault内の専用フォルダへ配置できる。状態JSONは設定JSONと同じフォルダを基準に相対指定でき、設定JSON・状態JSON・状態更新用一時ファイルは同期処理が自動的に同期対象外として扱う。旧版でCWD基準の相対`statePath`に既存stateがある場合はその場所を互換利用し、新規指定は設定JSON基準になる。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。設定JSONの例は `DESIGN.md` を参照する。
+Python版は `py/sync.py`、`py/r2sync/`、設定JSON・状態JSONをa-Shellから参照できる場所へ配置する。状態JSONは設定JSONと同じフォルダを基準に相対指定でき、設定JSON・状態JSON・状態更新用一時ファイルは同期処理が自動的に同期対象外として扱う。旧版でCWD基準の相対`statePath`に既存stateがある場合はその場所を互換利用し、新規指定は設定JSON基準になる。設定JSONには必ずプレースホルダーを置き換えた実値を利用者自身で記入する。配置例は `DESIGN_PYTHON.md` を参照する。
 
 Shortcuts の「Run a-Shell script」または a-Shell In App から、次の形で実行する。
 
 ```text
-python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
-python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
+python3 <python-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
+python3 <python-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
 ```
 
 開発環境でVaultとR2を現行同等に全実行する場合は、設定JSONに`"mode": "full"`を指定する。最初の実行はdry-runでVault走査、R2一覧、PULL/PUSH/delete/merge対象の検証だけを行い、結果JSONをShortcutsの通知で確認する。問題がなければ`--apply`を付ける。PUSHとmergeは`--apply`で実行され、削除だけは`--allow-delete`を追加する。
 
 ```text
-python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
-python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
-python3 <ios-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --allow-delete --apply
+python3 <python-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json
+python3 <python-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --apply
+python3 <python-script-path>/sync.py --config <vault-path>/r2-sync-tools/r2-sync-config.json --allow-delete --apply
 ```
 
 R2へ接続せず、ローカルの除外結果だけを確認するには次を実行する。1つ目はVault内の`IGNORE`と`INCLUDE`（同期対象候補）の両一覧、2つ目は指定したVault相対パス1件の判定を標準出力へ表示する。R2未照合のため`INCLUDE`はPUSH確定を意味しない。
@@ -141,5 +141,5 @@ Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、1リクエ
 ## 実行のたびに確認すること
 
 - 両側で変更されたUTF-8テキストは、stateにmerge baseがあれば3-way mergeする。同じ行の変更、baseなし、またはバイナリでは全体を競合停止し、どちらの内容も上書きしない。
-- `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは自分で `.env` の `IGNORE_EXTRA` に指定すること（`.env.example` に実例あり、`DESIGN.md`の「除外ルール」も参照）。指定を忘れると同期される。
+- `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは設定へ明示すること（Node.js版は`.env.example`、Python版は`py/config.example.json`と各設計書を参照）。指定を忘れると同期される。
 - ignoreパターンは設定ファイルのあるディレクトリを基準にしたGitignore風glob。専用フォルダに実行ファイルと設定をまとめた場合は`/**`でその配下をすべて除外できる。`/sync.py`は設定ファイルと同じディレクトリ直下、`sync.py`は配下の全階層に一致する。`./sync.py`は旧設定互換で`/sync.py`と同じ。

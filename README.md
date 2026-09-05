@@ -38,7 +38,7 @@ npm run sync:apply       # 削除以外を実際に適用
 npm run sync:full        # 削除も含めて完全に適用
 ```
 
-詳しい手順は [`SETUP.md`](./SETUP.md)、設計・アルゴリズムの詳細は [`DESIGN.md`](./DESIGN.md) を参照してください。
+詳しい手順は [`SETUP.md`](./SETUP.md)、共通設計は [`DESIGN.md`](./DESIGN.md)、実装別の詳細は [`DESIGN_NODE.md`](./DESIGN_NODE.md) と [`DESIGN_PYTHON.md`](./DESIGN_PYTHON.md) を参照してください。
 
 ## 安全設計
 
