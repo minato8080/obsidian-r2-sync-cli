@@ -42,6 +42,7 @@ BLOCK_TAG_SIZE = 16
 HEADER_SIZE = len(MAGIC) + 24
 ACTION_PATH_DISPLAY_LIMIT = 20
 REMOTE_OBJECT_DETAIL_LIMIT = 20
+UNICODE_COLLISION_POLICIES = {"error", "prefer-nfc"}
 
 
 def _sync_lock_path(vault: Path) -> Path:
@@ -127,7 +128,7 @@ def _report_result(progress, result: dict) -> None:
     _emit_progress(progress, f"ok: {'true' if result.get('ok') else 'false'}")
     for name in (
         "planned", "unchanged", "validated", "applied", "seeded", "ignoredRemoteDeletes",
-        "reconciledLocalFiles", "mergeBasesPruned", "mergeBasesPendingPrune",
+        "reconciledLocalFiles", "unicodeAliasesIgnored", "mergeBasesPruned", "mergeBasesPendingPrune",
     ):
         if name in result:
             _emit_progress(progress, f"{name}: {result[name]}")
@@ -744,11 +745,30 @@ def _report_fetch_progress(progress, done: int, total: int) -> None:
 
 
 def _safe_relative(value: str) -> str:
-    normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
+    return unicodedata.normalize("NFC", _safe_relative_spelling(value))
+
+
+def _safe_relative_spelling(value: str) -> str:
+    normalized = value.replace("\\", "/")
     path = PurePosixPath(normalized)
     if not normalized or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise PullError(f"unsafe relative path: {value!r}")
     return "/".join(path.parts)
+
+
+def _choose_nfc_candidate(raw_names: list[str], canonical: str, policy: str, source: str) -> int:
+    if len(raw_names) == 1:
+        return 0
+    if policy == "prefer-nfc":
+        exact = [index for index, raw_name in enumerate(raw_names) if raw_name == canonical]
+        if len(exact) == 1:
+            return exact[0]
+    raise PullError(f"multiple {source} paths normalize to the same path: {canonical!r}")
+
+
+def _record_unicode_aliases(stats: dict | None, count: int) -> None:
+    if stats is not None and count:
+        stats["ignored"] = stats.get("ignored", 0) + count
 
 
 def _vault_path(vault: Path, rel_path: str) -> Path:
@@ -790,7 +810,9 @@ def _state_rel_path(vault: Path, state_path: Path) -> str | None:
         return None
 
 
-def load_state(path: Path) -> dict:
+def load_state(
+    path: Path, unicode_collision_policy: str = "error", collision_stats: dict | None = None,
+) -> dict:
     try:
         with path.open("r", encoding="utf-8") as stream:
             value = json.load(stream)
@@ -798,16 +820,19 @@ def load_state(path: Path) -> dict:
         return {}
     if not isinstance(value, dict) or not isinstance(value.get("entries", {}), dict):
         raise PullError("state file has an invalid format")
-    entries = {}
-    raw_paths = {}
+    grouped = {}
     for raw_path, entry in value["entries"].items():
         if not isinstance(raw_path, str):
             raise PullError("state file has an invalid path")
         rel_path = _safe_relative(raw_path)
-        if rel_path in entries and raw_paths[rel_path] != raw_path:
-            raise PullError(f"multiple state paths normalize to the same path: {rel_path!r}")
-        entries[rel_path] = entry
-        raw_paths[rel_path] = raw_path
+        grouped.setdefault(rel_path, []).append((raw_path, entry))
+    entries = {}
+    for rel_path, candidates in grouped.items():
+        selected = _choose_nfc_candidate(
+            [raw_path for raw_path, _ in candidates], rel_path, unicode_collision_policy, "state"
+        )
+        entries[rel_path] = candidates[selected][1]
+        _record_unicode_aliases(collision_stats, len(candidates) - 1)
     return entries
 
 
@@ -904,6 +929,7 @@ def execute_probe(
     apply: bool = False,
     extra_protected_paths: list[str] | None = None,
     fetch_concurrency: int = 2,
+    unicode_collision_policy: str = "error",
     progress=None,
 ) -> dict:
     """Fetch and optionally apply explicit PULL files.
@@ -920,7 +946,8 @@ def execute_probe(
     _, is_protected_file = _ignore_matcher([], protected_paths=protected_paths)
     if len(files) < 1 or len(files) > 2:
         raise PullError("Probe accepts one or two files")
-    previous = load_state(state_file)
+    collision_stats = {"ignored": 0}
+    previous = load_state(state_file, unicode_collision_policy, collision_stats)
     specs = []
     conflicts = []
     for raw in files:
@@ -968,7 +995,7 @@ def execute_probe(
         total_ms = round((time.perf_counter() - started) * 1000, 2)
         return {"ok": False, "mode": "apply" if apply else "dry-run", "planned": len(specs), "validated": len(prepared), "applied": 0, "errors": errors, "conflicts": [], "timingsMs": {"conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0, "total": total_ms}}
 
-    result = {"ok": True, "mode": "apply" if apply else "dry-run", "planned": len(prepared), "validated": len(prepared), "applied": 0, "errors": [], "conflicts": [], "timingsMs": {"conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0}}
+    result = {"ok": True, "mode": "apply" if apply else "dry-run", "planned": len(prepared), "validated": len(prepared), "applied": 0, "unicodeAliasesIgnored": collision_stats["ignored"], "errors": [], "conflicts": [], "timingsMs": {"conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0}}
     if not apply:
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
@@ -1116,24 +1143,42 @@ def _ignore_matcher(
     return ignored_dir, ignored_file
 
 
+def _normalized_directory_entries(
+    directory: Path, rel_dir: str, unicode_collision_policy: str, collision_stats: dict | None,
+):
+    try:
+        entries = list(os.scandir(directory))
+    except OSError as error:
+        raise PullError(f"cannot scan vault: {directory}") from error
+    grouped = {}
+    for entry in entries:
+        entry_name = unicodedata.normalize("NFC", entry.name)
+        grouped.setdefault(entry_name, []).append(entry)
+    selected_entries = []
+    for entry_name, candidates in grouped.items():
+        canonical_path = f"{rel_dir}/{entry_name}" if rel_dir else entry_name
+        raw_paths = [f"{rel_dir}/{entry.name}" if rel_dir else entry.name for entry in candidates]
+        selected = _choose_nfc_candidate(
+            raw_paths, canonical_path, unicode_collision_policy, "local"
+        )
+        selected_entries.append((candidates[selected], entry_name))
+        _record_unicode_aliases(collision_stats, len(candidates) - 1)
+    return selected_entries
+
+
 def _scan_vault(
-    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
+    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None,
+    unicode_collision_policy: str = "error", collision_stats: dict | None = None,
 ) -> dict[str, dict]:
     """Recursively list regular files without following directory symlinks."""
     ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     result = {}
 
     def walk(directory: Path, rel_dir: str) -> None:
-        try:
-            entries = list(os.scandir(directory))
-        except OSError as error:
-            raise PullError(f"cannot scan vault: {directory}") from error
-        normalized_names = {}
-        for entry in entries:
-            entry_name = unicodedata.normalize("NFC", entry.name)
-            if entry_name in normalized_names and normalized_names[entry_name] != entry.name:
-                raise PullError(f"multiple local paths normalize to the same path: {rel_dir}/{entry_name}")
-            normalized_names[entry_name] = entry.name
+        entries = _normalized_directory_entries(
+            directory, rel_dir, unicode_collision_policy, collision_stats
+        )
+        for entry, entry_name in entries:
             rel_path = f"{rel_dir}/{entry_name}" if rel_dir else entry_name
             if entry.is_dir(follow_symlinks=False):
                 if not ignored_dir(rel_path):
@@ -1172,7 +1217,7 @@ def _reconcile_local_files(vault: Path, local: dict[str, dict], remote_paths) ->
 
 def _classify_vault_paths(
     vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None,
-    verbose: bool = False,
+    verbose: bool = False, unicode_collision_policy: str = "error",
 ) -> tuple[list[str], list[str]]:
     """Classify local paths with the sync matcher without changing the vault."""
     ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
@@ -1180,16 +1225,11 @@ def _classify_vault_paths(
     included_paths = []
 
     def walk(directory: Path, rel_dir: str, inherited_ignore: bool = False) -> None:
-        try:
-            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
-        except OSError as error:
-            raise PullError(f"cannot scan vault: {directory}") from error
-        normalized_names = {}
-        for entry in entries:
-            entry_name = unicodedata.normalize("NFC", entry.name)
-            if entry_name in normalized_names and normalized_names[entry_name] != entry.name:
-                raise PullError(f"multiple local paths normalize to the same path: {rel_dir}/{entry_name}")
-            normalized_names[entry_name] = entry.name
+        entries = sorted(
+            _normalized_directory_entries(directory, rel_dir, unicode_collision_policy, None),
+            key=lambda item: item[1],
+        )
+        for entry, entry_name in entries:
             rel_path = f"{rel_dir}/{entry_name}" if rel_dir else entry_name
             if entry.is_dir(follow_symlinks=False):
                 directory_ignored = inherited_ignore or ignored_dir(rel_path)
@@ -1274,11 +1314,13 @@ def _entry_from_stat(stat: os.stat_result, etag: str | None, data: bytes | None 
 
 def _collect_remote_objects(
     listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None,
-    protected_paths: list[str] | None = None
+    protected_paths: list[str] | None = None, unicode_collision_policy: str = "error",
+    collision_stats: dict | None = None,
 ) -> tuple[dict[str, dict], list[dict], list[dict]]:
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
     remotes = {}
+    grouped = {}
     ignored = []
     conflicts = []
     _, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
@@ -1291,19 +1333,35 @@ def _collect_remote_objects(
             continue
         encrypted_path = key[len(prefix):] if prefix else key
         try:
-            rel_path = _safe_relative(decoder.decrypt_path(encrypted_path) if hasattr(decoder, "decrypt_path") else encrypted_path)
+            decoded_path = decoder.decrypt_path(encrypted_path) if hasattr(decoder, "decrypt_path") else encrypted_path
+            decoded_spelling = _safe_relative_spelling(decoded_path)
+            rel_path = unicodedata.normalize("NFC", decoded_spelling)
         except Exception as error:
             ignored.append({"key": key, "reason": f"cannot decode object path: {error}"})
             continue
         if ignored_file(rel_path):
             ignored.append({"key": key, "path": rel_path, "reason": "ignored"})
             continue
-        if rel_path in remotes:
-            conflicts.append({"path": rel_path, "reason": "multiple remote objects decode to the same path"})
-            continue
         item = dict(raw)
         item["key"] = key
-        remotes[rel_path] = item
+        item["_decodedPath"] = decoded_spelling
+        grouped.setdefault(rel_path, []).append(item)
+    for rel_path, candidates in grouped.items():
+        try:
+            selected = _choose_nfc_candidate(
+                [candidate["_decodedPath"] for candidate in candidates], rel_path,
+                unicode_collision_policy, "remote",
+            )
+        except PullError:
+            conflicts.append({"path": rel_path, "reason": "multiple remote objects decode to the same path"})
+            continue
+        remotes[rel_path] = candidates[selected]
+        aliases = [candidate for index, candidate in enumerate(candidates) if index != selected]
+        ignored.extend({
+            "key": alias["key"], "path": alias["_decodedPath"],
+            "reason": "Unicode alias ignored in favor of NFC",
+        } for alias in aliases)
+        _record_unicode_aliases(collision_stats, len(aliases))
     return remotes, ignored, conflicts
 
 
@@ -1450,6 +1508,7 @@ def execute_full(
     apply: bool = False,
     extra_protected_paths: list[str] | None = None,
     fetch_concurrency: int = 2,
+    unicode_collision_policy: str = "error",
 ) -> dict:
     """Run a full, PULL-only scan with all writes deferred until validation."""
     started = time.perf_counter()
@@ -1458,8 +1517,11 @@ def execute_full(
     state_rel_path = _state_rel_path(vault, state_file)
     protected_paths = [state_rel_path] if state_rel_path else []
     protected_paths.extend(extra_protected_paths or [])
-    previous = load_state(state_file)
-    local = _scan_vault(vault, extra_patterns, protected_paths)
+    collision_stats = {"ignored": 0}
+    previous = load_state(state_file, unicode_collision_policy, collision_stats)
+    local = _scan_vault(
+        vault, extra_patterns, protected_paths, unicode_collision_policy, collision_stats
+    )
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
 
@@ -1474,39 +1536,17 @@ def execute_full(
             "timingsMs": {"scan": 0, "conflictCheck": 0, "fetchValidate": 0, "apply": 0, "total": total_ms},
         }
 
-    remotes = {}
-    ignored_remote = []
-    _, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
-    for raw in listed:
-        if not isinstance(raw, dict) or not isinstance(raw.get("key"), str):
-            return {
-                "ok": False, "mode": "apply" if apply else "dry-run", "scannedLocal": len(local),
-                "scannedRemote": len(listed), "planned": 0, "validated": 0, "applied": 0, "seeded": 0,
-                "ignoredRemoteDeletes": 0, "errors": [{"error": "R2 LIST returned an invalid object"}],
-                "conflicts": [], "timingsMs": {},
-            }
-        key = raw["key"]
-        if prefix and not key.startswith(prefix):
-            continue
-        encrypted_path = key[len(prefix):] if prefix else key
-        try:
-            rel_path = _safe_relative(decoder.decrypt_path(encrypted_path) if hasattr(decoder, "decrypt_path") else encrypted_path)
-        except Exception as error:
-            ignored_remote.append({"key": key, "reason": f"cannot decode object path: {error}"})
-            continue
-        if ignored_file(rel_path):
-            ignored_remote.append({"key": key, "path": rel_path, "reason": "ignored"})
-            continue
-        if rel_path in remotes:
-            return {
-                "ok": False, "mode": "apply" if apply else "dry-run", "scannedLocal": len(local),
-                "scannedRemote": len(listed), "planned": 0, "validated": 0, "applied": 0, "seeded": 0,
-                "ignoredRemoteDeletes": 0, "errors": [], "conflicts":[{"path": rel_path, "reason": "multiple remote objects decode to the same path"}],
-                "timingsMs": {},
-            }
-        raw = dict(raw)
-        raw["key"] = key
-        remotes[rel_path] = raw
+    remotes, ignored_remote, remote_conflicts = _collect_remote_objects(
+        listed, decoder, remote_prefix, extra_patterns, protected_paths,
+        unicode_collision_policy, collision_stats,
+    )
+    if remote_conflicts:
+        return {
+            "ok": False, "mode": "apply" if apply else "dry-run", "scannedLocal": len(local),
+            "scannedRemote": len(listed), "planned": 0, "validated": 0, "applied": 0, "seeded": 0,
+            "ignoredRemoteDeletes": 0, "unicodeAliasesIgnored": collision_stats["ignored"],
+            "errors": [], "conflicts": remote_conflicts, "timingsMs": {},
+        }
 
     reconciled_local_files = _reconcile_local_files(vault, local, remotes)
 
@@ -1598,6 +1638,7 @@ def execute_full(
         "scannedRemote": len(listed), "planned": len(fetch_actions), "validated": len(prepared) + len(seed_actions),
         "applied": 0, "seeded": 0, "ignoredRemoteDeletes": ignored_remote_deletes,
         "reconciledLocalFiles": reconciled_local_files,
+        "unicodeAliasesIgnored": collision_stats["ignored"],
         "ignoredRemoteObjects": ignored_remote, "errors": [], "conflicts": [],
         "timingsMs": {"scan": scan_ms, "conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0},
     }
@@ -1672,6 +1713,7 @@ def execute_full_sync(
     text_merge_base_max_bytes: int | None = None,
     recheck_remote_before_apply: bool = True,
     fetch_concurrency: int = 2,
+    unicode_collision_policy: str = "error",
     progress=None,
 ) -> dict:
     """Run the opt-in full bidirectional sync path.
@@ -1686,19 +1728,23 @@ def execute_full_sync(
     state_rel_path = _state_rel_path(vault, state_file)
     protected_paths = [state_rel_path] if state_rel_path else []
     protected_paths.extend(extra_protected_paths or [])
+    collision_stats = {"ignored": 0}
     previous, merge_bases_to_prune = _prune_merge_bases(
-        load_state(state_file), text_merge_base_max_bytes
+        load_state(state_file, unicode_collision_policy, collision_stats), text_merge_base_max_bytes
     )
     _emit_progress(progress, "VaultとR2を走査しています...")
     scan_local_started = time.perf_counter()
-    local = _scan_vault(vault, extra_patterns, protected_paths)
+    local = _scan_vault(
+        vault, extra_patterns, protected_paths, unicode_collision_policy, collision_stats
+    )
     scan_local_ms = round((time.perf_counter() - scan_local_started) * 1000, 2)
     list_remote_started = time.perf_counter()
     listed = list_remote(remote_prefix)
     list_remote_ms = round((time.perf_counter() - list_remote_started) * 1000, 2)
     decode_remote_started = time.perf_counter()
     remotes, ignored_remote, list_conflicts = _collect_remote_objects(
-        listed, decoder, remote_prefix, extra_patterns, protected_paths
+        listed, decoder, remote_prefix, extra_patterns, protected_paths,
+        unicode_collision_policy, collision_stats,
     )
     decode_remote_ms = round((time.perf_counter() - decode_remote_started) * 1000, 2)
     reconcile_local_started = time.perf_counter()
@@ -1859,6 +1905,7 @@ def execute_full_sync(
         "mode": "apply" if apply else "dry-run", "unchanged": unchanged,
         "scannedLocal": len(local), "scannedRemote": len(listed), "planned": len(applicable_actions), "validated": prepared_count,
         "applied": 0, "reconciledLocalFiles": reconciled_local_files,
+        "unicodeAliasesIgnored": collision_stats["ignored"],
         "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
         "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
         "remoteSnapshotRechecked": False,
@@ -1956,7 +2003,8 @@ def execute_full_sync(
         try:
             latest_listed = list_remote(remote_prefix)
             latest_remotes, _, latest_conflicts = _collect_remote_objects(
-                latest_listed, decoder, remote_prefix, extra_patterns, protected_paths
+                latest_listed, decoder, remote_prefix, extra_patterns, protected_paths,
+                unicode_collision_policy,
             )
             result["conflicts"].extend(latest_conflicts)
             snapshot_paths = sorted(set(remotes) | set(latest_remotes))
@@ -2122,6 +2170,9 @@ def _load_config(path: Path) -> dict:
     request_timeout = config.get("requestTimeoutSeconds", 30)
     if isinstance(request_timeout, bool) or not isinstance(request_timeout, (int, float)) or not 1 <= request_timeout <= 300:
         raise PullError("requestTimeoutSeconds must be a number from 1 to 300")
+    unicode_collision_policy = config.get("unicodeCollisionPolicy", "error")
+    if not isinstance(unicode_collision_policy, str) or unicode_collision_policy not in UNICODE_COLLISION_POLICIES:
+        raise PullError("unicodeCollisionPolicy must be error or prefer-nfc")
     return config
 
 
@@ -2151,10 +2202,12 @@ def main(argv: list[str] | None = None) -> int:
         extra_protected_paths = [config_rel_path] if config_rel_path else []
         state_rel_path = _state_rel_path(vault_path, state_path)
         protected_paths = ([state_rel_path] if state_rel_path else []) + extra_protected_paths
+        unicode_collision_policy = config.get("unicodeCollisionPolicy", "error")
         if args.check_ignore is not None:
             print("=== 除外判定（ローカルのみ / R2通信なし）===")
             print(f"vault: {vault_path}")
             print(f"ignoreExtra: {_format_count(len(config.get('ignoreExtra', [])), 'pattern')}")
+            print(f"unicodeCollisionPolicy: {unicode_collision_policy}")
             if args.check_ignore:
                 ignored_dir, ignored_file = _ignore_matcher(config.get("ignoreExtra", []), protected_paths)
                 all_ignored = True
@@ -2168,7 +2221,8 @@ def main(argv: list[str] | None = None) -> int:
                     all_ignored = all_ignored and ignored
                 return 0 if all_ignored else 1
             ignored_paths, included_paths = _classify_vault_paths(
-                vault_path, config.get("ignoreExtra", []), protected_paths, verbose=args.verbose
+                vault_path, config.get("ignoreExtra", []), protected_paths, verbose=args.verbose,
+                unicode_collision_policy=unicode_collision_policy,
             )
             print(f"\n[IGNORE] {_format_count(len(ignored_paths), 'entry', 'entries')}")
             if args.verbose:
@@ -2204,6 +2258,7 @@ def main(argv: list[str] | None = None) -> int:
         progress(f"vault: {config['vaultPath']}")
         progress(f"mode: {'APPLY (削除含む)' if args.apply and args.allow_delete else 'APPLY (削除は警告のみ)' if args.apply else 'DRY-RUN'}")
         progress(f"fetch concurrency: {fetch_concurrency} / request timeout: {request_timeout}秒")
+        progress(f"unicode collision policy: {unicode_collision_policy}")
         if full:
             result = execute_full_sync(
                 config["vaultPath"], state_path, r2.list_all, r2.get_object, r2.put_object, r2.delete_object, decoder,
@@ -2213,6 +2268,7 @@ def main(argv: list[str] | None = None) -> int:
                 text_merge_base_max_bytes=config.get("textMergeBaseMaxBytes"),
                 recheck_remote_before_apply=config.get("recheckRemoteBeforeApply", True),
                 fetch_concurrency=fetch_concurrency,
+                unicode_collision_policy=unicode_collision_policy,
                 progress=progress,
             )
         else:
@@ -2224,7 +2280,8 @@ def main(argv: list[str] | None = None) -> int:
                     item["key"] = prefix + (decoder.encrypt_path(_safe_relative(item["path"])) if mode == "rclone-base64" else _safe_relative(item["path"]))
             result = execute_probe(
                 config["vaultPath"], state_path, files, r2.get_object, decoder, args.apply,
-                extra_protected_paths=extra_protected_paths, fetch_concurrency=fetch_concurrency, progress=progress,
+                extra_protected_paths=extra_protected_paths, fetch_concurrency=fetch_concurrency,
+                unicode_collision_policy=unicode_collision_policy, progress=progress,
             )
         _report_result(progress, result)
         print(json.dumps(_result_for_json(result), ensure_ascii=False, indent=2))

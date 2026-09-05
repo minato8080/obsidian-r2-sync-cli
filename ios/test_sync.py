@@ -347,6 +347,90 @@ class PullProbeTests(unittest.TestCase):
             with self.assertRaisesRegex(pull_module.PullError, "multiple local paths normalize"):
                 _scan_vault(vault)
 
+    def test_prefer_nfc_uses_exact_local_name_without_deleting_alias(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            nfc_name = "アクアパッツア.md"
+            nfd_name = unicodedata.normalize("NFD", nfc_name)
+            (vault / nfc_name).write_bytes(b"nfc")
+            (vault / nfd_name).write_bytes(b"nfd-alias")
+            if len(list(vault.iterdir())) < 2:
+                self.skipTest("filesystem does not permit distinct NFC and NFD names")
+            stats = {"ignored": 0}
+
+            files = _scan_vault(
+                vault, unicode_collision_policy="prefer-nfc", collision_stats=stats
+            )
+
+            self.assertEqual(set(files), {nfc_name})
+            self.assertEqual(files[nfc_name]["size"], len(b"nfc"))
+            self.assertEqual(stats["ignored"], 1)
+            self.assertTrue((vault / nfd_name).exists())
+
+    def test_prefer_nfc_uses_exact_remote_name_and_reports_alias(self):
+        with tempfile.TemporaryDirectory() as root:
+            nfc_path = "inbox/アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            remote = FakeRemote({
+                nfd_path: RemoteObject(b"nfd-alias", "nfd", {}),
+                nfc_path: RemoteObject(b"nfc", "nfc", {}),
+            })
+
+            result = execute_full_sync(
+                Path(root) / "vault", Path(root) / "state.json",
+                remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=False, push=True,
+                unicode_collision_policy="prefer-nfc",
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["unicodeAliasesIgnored"], 1)
+            self.assertEqual(result["plannedByType"], {"PULL": 1})
+            self.assertEqual(remote.calls, [nfc_path])
+            self.assertTrue(any(
+                item.get("key") == nfd_path and "Unicode alias" in item.get("reason", "")
+                for item in result["ignoredRemoteObjects"]
+            ))
+
+    def test_prefer_nfc_remote_selection_is_independent_of_alias_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            nfc_path = "inbox/é.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            other_alias = "inbox/e\u0341.md"
+            remote = FakeRemote({
+                nfd_path: RemoteObject(b"nfd", "nfd", {}),
+                other_alias: RemoteObject(b"other", "other", {}),
+                nfc_path: RemoteObject(b"nfc", "nfc", {}),
+            })
+
+            result = execute_full_sync(
+                Path(root) / "vault", Path(root) / "state.json",
+                remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=False, push=True,
+                unicode_collision_policy="prefer-nfc",
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["unicodeAliasesIgnored"], 2)
+            self.assertEqual(remote.calls, [nfc_path])
+
+    def test_prefer_nfc_uses_exact_state_key(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "state.json"
+            nfc_path = "アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            state.write_text(json.dumps({"version": 1, "entries": {
+                nfd_path: {"remoteETag": "nfd"},
+                nfc_path: {"remoteETag": "nfc"},
+            }}, ensure_ascii=False), encoding="utf-8")
+            stats = {"ignored": 0}
+
+            entries = load_state(state, "prefer-nfc", stats)
+
+            self.assertEqual(entries, {nfc_path: {"remoteETag": "nfc"}})
+            self.assertEqual(stats["ignored"], 1)
+
     def test_full_sync_prunes_large_and_binary_merge_bases_when_enabled(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"
@@ -665,6 +749,8 @@ class PullProbeTests(unittest.TestCase):
                 ("requestTimeoutSeconds", 301),
                 ("requestTimeoutSeconds", True),
                 ("requestTimeoutSeconds", "10"),
+                ("unicodeCollisionPolicy", "prefer-newest"),
+                ("unicodeCollisionPolicy", []),
             ):
                 config.write_text(json.dumps({**base, field: value}), encoding="utf-8")
                 with self.assertRaises(Exception):

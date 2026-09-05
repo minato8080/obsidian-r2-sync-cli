@@ -218,6 +218,7 @@ ios/
   "secretAccessKey": "<secret-access-key>",
   "password": "<sync-password>",
   "mode": "full",
+  "unicodeCollisionPolicy": "error",
   "remotePrefix": "",
   "ignoreExtra": [
     "r2-sync-tools/**",
@@ -238,7 +239,7 @@ Node版と同じく、開始時にVaultとDRY-RUN/APPLYモード、走査後にl
 
 同期処理内部の`ignoredRemoteObjects`は診断可能性のため全件を保持するが、標準出力用JSONを作る際に別オブジェクトへ浅くコピーして圧縮する。除外matcherへ正常一致した`reason: "ignored"`は個別要素を出力せず、`ignoredRemoteObjectsTotal`と`ignoredRemoteObjectsOmitted`へ件数を記録する。復号不能など`ignored`以外の理由は先頭20件だけ`ignoredRemoteObjects`に残す。これにより内部APIとテスト用結果を変えず、通常ログだけを短縮する。人向け最終結果には全件数を`ignoredRemoteObjects: N`として表示する。
 
-Python版の論理パスはUnicode NFCへ統一する。`_safe_relative`でR2復号パスと外部入力を、ローカル走査時に各`DirEntry.name`を、`load_state`で既存stateキーをNFC化する。除外patternと保護パスも同じ表現へ揃える。正規化で複数のローカル名またはstateキーが衝突した場合は`PullError`、複数remote objectが衝突した場合は既存のremote path競合として変更前に停止する。実ファイル参照ではNFCパスの完全一致を優先し、存在しない場合だけ各階層でNFC同値の実名を解決するため、正規化を区別するファイルシステムでも既存のNFD名を複製しない。既存remote objectを更新するPUSH／MERGEは復号前の元object keyを再利用する。
+Python版の論理パスはUnicode NFCへ統一する。`_safe_relative`でR2復号パスと外部入力を、ローカル走査時に各`DirEntry.name`を、`load_state`で既存stateキーをNFC化する。除外patternと保護パスも同じ表現へ揃える。`unicodeCollisionPolicy`の既定値`error`では、正規化で複数のローカル名またはstateキーが衝突した場合は`PullError`、複数remote objectが衝突した場合はremote path競合として変更前に停止する。明示値`prefer-nfc`では、衝突集合に正規化前からNFCと一致する候補がちょうど1つある場合だけそれを採用し、その他のaliasを同期mapから除外する。aliasのファイル／objectは削除・変更せず、除外総数を`unicodeAliasesIgnored`へ記録する。一意なNFC候補がない場合は安全側で停止を維持する。実ファイル参照ではNFCパスの完全一致を優先し、存在しない場合だけ各階層でNFC同値の実名を解決するため、正規化を区別するファイルシステムでも既存のNFD名を複製しない。既存remote objectを更新するPUSH／MERGEは復号前の元object keyを再利用する。
 
 R2パス復号後は、remoteには存在するが最初の`os.scandir`結果にない論理パスを適用計画前に直接確認する。既存regular fileとして解決できたパスはmtime／sizeをローカルmapへ補完し、`reconciledLocalFiles`へ件数を記録する。これによりFiles Providerが列挙時に返さなかったファイルもBOOTSTRAPまたは通常の3-way比較へ入り、`NEW_REMOTE`から適用直前の`target appeared during fetch`になる誤判定を避ける。
 

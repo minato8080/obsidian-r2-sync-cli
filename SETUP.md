@@ -126,7 +126,9 @@ full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動merge�
 
 除外ルールへ一致したremote objectは、人向け結果の`ignoredRemoteObjects`件数と最終JSONの総数・省略数だけで確認する。通常の除外パスは最終JSONへ1件ずつ展開しない。ファイル名を復号できないobjectなど調査が必要な詳細だけを最大20件表示する。
 
-日本語の濁点・半濁点などを含むファイル名は、iOSと他OSでUnicode NFC／NFD表現が異なる場合がある。Python版は論理パスをNFCへ統一し、ローカル走査から漏れたremoteパスも計画前に直接再解決する。再解決した既存ファイル数は`reconciledLocalFiles`として表示され、新規PULLではなく内容比較の対象になる。正規化後に同名となる複数ファイルが実在する場合は安全のため停止する。
+日本語の濁点・半濁点などを含むファイル名は、iOSと他OSでUnicode NFC／NFD表現が異なる場合がある。Python版は論理パスをNFCへ統一し、ローカル走査から漏れたremoteパスも計画前に直接再解決する。再解決した既存ファイル数は`reconciledLocalFiles`として表示され、新規PULLではなく内容比較の対象になる。正規化後に同名となる複数ファイルが実在する場合は、既定では安全のため停止する。
+
+Unicode正規化後に同名となる複数候補があり、手動整理せず同期を続ける必要がある場合は、設定へ`"unicodeCollisionPolicy": "prefer-nfc"`を追加する。一意なNFC表記だけを同期対象とし、NFDなどのaliasは削除せず残したまま同期対象外にする。除外数は`unicodeAliasesIgnored`へ表示される。一意なNFC表記がない衝突は停止する。既定の`"error"`は従来どおりすべての衝突で停止する。
 
 stateが添付ファイルのmerge baseで大きくなる場合は、設定へ`"textMergeBaseMaxBytes": 1048576`を追加すると、1MiB以下のUTF-8テキストだけbaseを保持する。画像・PDF・大容量テキストなどbaseを保持しないファイルが両側変更された場合は、上書きせず競合停止する。未指定では従来どおり全内容を保持する。
 
