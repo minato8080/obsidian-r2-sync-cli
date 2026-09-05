@@ -163,6 +163,22 @@ class PullProbeTests(unittest.TestCase):
             self.assertNotIn("変更を適用しています", rendered)
             self.assertNotIn("適用中:", rendered)
 
+    def test_action_plan_lists_at_most_twenty_paths_per_type(self):
+        messages = []
+        actions = [
+            {"type": "NOOP", "path": f"note-{index:02d}.md"}
+            for index in range(25)
+        ]
+
+        pull_module._report_action_plan(messages.append, actions)
+
+        rendered = "\n".join(messages)
+        self.assertIn("[NOOP] 25件", rendered)
+        self.assertEqual(sum(message.startswith("  note-") for message in messages), 20)
+        self.assertIn("  note-19.md", rendered)
+        self.assertNotIn("  note-20.md", rendered)
+        self.assertIn("  ...ほか5件", rendered)
+
     def test_full_sync_batches_seed_only_state_checkpoint(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"

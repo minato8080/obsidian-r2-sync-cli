@@ -39,6 +39,7 @@ MAGIC = b"RCLONE\x00\x00"
 BLOCK_DATA_SIZE = 64 * 1024
 BLOCK_TAG_SIZE = 16
 HEADER_SIZE = len(MAGIC) + 24
+ACTION_PATH_DISPLAY_LIMIT = 20
 
 
 def _sync_lock_path(vault: Path) -> Path:
@@ -108,11 +109,11 @@ def _report_action_plan(progress, actions: list[dict]) -> None:
         grouped.setdefault(action["type"], []).append(action)
     for action_type, items in grouped.items():
         _emit_progress(progress, f"\n[{action_type}] {len(items)}件")
-        for action in items[:50]:
+        for action in items[:ACTION_PATH_DISPLAY_LIMIT]:
             reason = f" ({action['reason']})" if action.get("reason") else ""
             _emit_progress(progress, f"  {action['path']}{reason}")
-        if len(items) > 50:
-            _emit_progress(progress, f"  ...ほか{len(items) - 50}件")
+        if len(items) > ACTION_PATH_DISPLAY_LIMIT:
+            _emit_progress(progress, f"  ...ほか{len(items) - ACTION_PATH_DISPLAY_LIMIT}件")
 
 
 def _report_result(progress, result: dict) -> None:
