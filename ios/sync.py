@@ -1027,14 +1027,15 @@ def _scan_vault(
 
 
 def _classify_vault_paths(
-    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
+    vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None,
+    verbose: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Classify local paths with the sync matcher without changing the vault."""
     ignored_dir, ignored_file = _ignore_matcher(extra_patterns, protected_paths)
     ignored_paths = []
     included_paths = []
 
-    def walk(directory: Path, rel_dir: str) -> None:
+    def walk(directory: Path, rel_dir: str, inherited_ignore: bool = False) -> None:
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:
@@ -1042,17 +1043,30 @@ def _classify_vault_paths(
         for entry in entries:
             rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
             if entry.is_dir(follow_symlinks=False):
-                if ignored_dir(rel_path):
+                directory_ignored = inherited_ignore or ignored_dir(rel_path)
+                if directory_ignored:
                     ignored_paths.append(rel_path + "/")
+                    if verbose:
+                        walk(Path(entry.path), rel_path, True)
                 else:
-                    walk(Path(entry.path), rel_path)
+                    walk(Path(entry.path), rel_path, False)
             elif entry.is_file(follow_symlinks=False):
-                (ignored_paths if ignored_file(rel_path) else included_paths).append(rel_path)
+                (ignored_paths if inherited_ignore or ignored_file(rel_path) else included_paths).append(rel_path)
 
     if not vault.exists() or not vault.is_dir():
         raise PullError("vaultPath must be an existing directory")
     walk(vault, "")
     return ignored_paths, included_paths
+
+
+def _group_paths_by_parent(paths: list[str]) -> list[tuple[str, int]]:
+    """Group files by their immediate parent directory."""
+    groups: dict[str, int] = {}
+    for rel_path in paths:
+        parent = PurePosixPath(rel_path).parent.as_posix()
+        label = "./" if parent == "." else parent + "/"
+        groups[label] = groups.get(label, 0) + 1
+    return sorted(groups.items())
 
 
 def _remote_mtime_ms(remote: RemoteObject, listed: dict) -> float:
@@ -1929,6 +1943,7 @@ def main(argv: list[str] | None = None) -> int:
         "--check-ignore", nargs="*", metavar="PATH",
         help="check ignored vault-relative paths locally; omit PATH to list ignored vault entries",
     )
+    parser.add_argument("--verbose", action="store_true", help="show every path in --check-ignore mode")
     # Kept hidden so an already-installed Shortcut can be migrated separately.
     parser.add_argument("--full", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--push", action="store_true", help=argparse.SUPPRESS)
@@ -1961,14 +1976,22 @@ def main(argv: list[str] | None = None) -> int:
                     all_ignored = all_ignored and ignored
                 return 0 if all_ignored else 1
             ignored_paths, included_paths = _classify_vault_paths(
-                vault_path, config.get("ignoreExtra", []), protected_paths
+                vault_path, config.get("ignoreExtra", []), protected_paths, verbose=args.verbose
             )
             print(f"\n[IGNORE] {len(ignored_paths)}件")
-            for rel_path in ignored_paths:
-                print(f"  {rel_path}")
+            if args.verbose:
+                for rel_path in ignored_paths:
+                    print(f"  {rel_path}")
+            else:
+                for rel_path in ignored_paths:
+                    print(f"  {rel_path}{' (配下すべて)' if rel_path.endswith('/') else ''}")
             print(f"\n[INCLUDE] {len(included_paths)}件")
-            for rel_path in included_paths:
-                print(f"  {rel_path}")
+            if args.verbose:
+                for rel_path in included_paths:
+                    print(f"  {rel_path}")
+            else:
+                for folder, count in _group_paths_by_parent(included_paths):
+                    print(f"  {folder} ({count}件)")
             return 0
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):

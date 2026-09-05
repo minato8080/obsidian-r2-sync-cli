@@ -374,11 +374,16 @@ class PullProbeTests(unittest.TestCase):
                 "ignoreExtra": ["ignored/**", "**/.env"],
             }), encoding="utf-8")
             listed_stdout = io.StringIO()
+            verbose_stdout = io.StringIO()
             checked_stdout = io.StringIO()
 
             with mock.patch.object(pull_module, "R2Client", side_effect=AssertionError("R2 must not be used")):
                 with redirect_stdout(listed_stdout), redirect_stderr(io.StringIO()):
                     list_exit = pull_module.main(["--config", str(config), "--check-ignore"])
+                with redirect_stdout(verbose_stdout), redirect_stderr(io.StringIO()):
+                    verbose_exit = pull_module.main([
+                        "--config", str(config), "--verbose", "--check-ignore",
+                    ])
                 with redirect_stdout(checked_stdout), redirect_stderr(io.StringIO()):
                     check_exit = pull_module.main([
                         "--config", str(config), "--check-ignore", "ignored/file.txt", "keep.txt",
@@ -386,11 +391,17 @@ class PullProbeTests(unittest.TestCase):
 
             self.assertEqual(list_exit, 0)
             self.assertIn("[IGNORE] 3件", listed_stdout.getvalue())
-            self.assertIn("  ignored/", listed_stdout.getvalue())
+            self.assertIn("  ignored/ (配下すべて)", listed_stdout.getvalue())
             self.assertIn("  .env", listed_stdout.getvalue())
             self.assertIn("  state.json", listed_stdout.getvalue())
             self.assertIn("[INCLUDE] 1件", listed_stdout.getvalue())
-            self.assertIn("  keep.txt", listed_stdout.getvalue())
+            self.assertIn("  ./ (1件)", listed_stdout.getvalue())
+            self.assertNotIn("  keep.txt", listed_stdout.getvalue())
+            self.assertEqual(verbose_exit, 0)
+            self.assertIn("[IGNORE] 4件", verbose_stdout.getvalue())
+            self.assertIn("  ignored/file.txt", verbose_stdout.getvalue())
+            self.assertIn("[INCLUDE] 1件", verbose_stdout.getvalue())
+            self.assertIn("  keep.txt", verbose_stdout.getvalue())
             self.assertEqual(check_exit, 1)
             self.assertIn("[IGNORE] ignored/file.txt", checked_stdout.getvalue())
             self.assertIn("[INCLUDE] keep.txt", checked_stdout.getvalue())

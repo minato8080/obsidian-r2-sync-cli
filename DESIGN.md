@@ -123,7 +123,7 @@ SEEDはVault/R2を変更しないため、entryをメモリ上で更新し、次
 
 Python版は上記に加えて、basenameが`state.json`のファイルをVault全階層で常時除外する。設定した`statePath`そのものとcheckpoint一時ファイルを保護する既存処理も維持する。ローカル走査、復号後のR2一覧、旧stateのフィルタで同じ判定を使うため、`ignoreExtra`に記載がなくても同期計画へ入らない。Node版の除外ルールは変更しない。
 
-`sync.py --config <config> --check-ignore`は同じmatcherでVaultを読み取り専用走査し、除外するファイル／ディレクトリを`IGNORE`、除外されないローカルファイルを`INCLUDE`として標準出力へ表示し、R2クライアント生成前に終了する。除外ディレクトリはそのディレクトリ名だけを表示して配下の走査を省略する。`INCLUDE`はR2未照合のためPUSH／NOOP／PULLを区別しない。`--check-ignore <path>...`では指定したVault相対パスだけを判定する。リポジトリの`justfile`は一覧用`check-ignore`と個別判定用`check-ignore-path`を提供する。
+`sync.py --config <config> --check-ignore`は同じmatcherでVaultを読み取り専用走査し、除外するファイル／ディレクトリを`IGNORE`、除外されないローカルファイルを`INCLUDE`として標準出力へ表示し、R2クライアント生成前に終了する。通常表示の`IGNORE`はディレクトリ全体の除外だけを`配下すべて`として走査を打ち切り、`.env`や個別指定ファイルはパスを1件ずつ表示する。`INCLUDE`は直近の親フォルダ単位で集計する。`--verbose`では除外ディレクトリ配下も読み取り専用走査し、判定した全パスを列挙する。`INCLUDE`はR2未照合のためPUSH／NOOP／PULLを区別しない。`--check-ignore <path>...`では指定したVault相対パスだけを判定する。リポジトリの`justfile`は通常一覧、verbose一覧、個別判定のrecipeを提供する。
 
 Node版の`.env`と同期state、iOS版の設定JSON・同期state・state更新用一時ファイルは、Vault内にある場合も実装が自動的に除外する。それ以外（秘匿フォルダ、このツール自身の配置先、Obsidianの端末固有UI状態ファイルなど）は `.env` の `IGNORE_EXTRA` で利用者が指定する（`.env.example` に記法と実例あり）。
 
