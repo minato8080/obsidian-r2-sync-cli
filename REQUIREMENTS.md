@@ -61,7 +61,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - iOS/Python版のR2リクエストtimeoutは`requestTimeoutSeconds`で1〜300秒を指定でき、既定値は30秒とする
 - PC版の並列数8は変更しない
 - 定常時の全件NOOP判定ではファイル内容を再読込せず、走査で取得したmtime/sizeを前回stateと比較する
-- `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`を個別に返す
+- `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`、走査漏れした既存ローカルパスを再解決する`reconcileLocal`を個別に返す
 - NOOPパスは実際にファイルへアクセスする分岐まで絶対パス解決を遅延し、定常時の差分判定でファイルシステムへ再アクセスしない
 - `timingsMs`は適用前R2再確認の`snapshotCheck`、R2変更の`applyRemote`、state保存の`applyCheckpoint`も個別に返す
 
@@ -106,6 +106,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Python版の並列取得中にCtrl+Cを受けた場合は、未開始タスクを取り消してworker待機をせず終了する。取得・検証段階ではVault、R2、stateを変更しない
 - Python版の同期実行は、正規化したVaultパス単位の非待機OSロックをR2接続前に取得し、処理終了まで保持する。同一端末・同一利用者から同じVaultへの別実行が進行中なら、待機せずエラー結果と終了コード1を返し、Vault、R2、stateを変更しない。ロックは正常終了、例外、Ctrl+C、プロセス終了時に解放され、ロック用ファイルはVault外の一時領域へ置く。読み取り専用の`--check-ignore`はロック対象外とする
 - Node版および別端末の同期処理はPython版のOSロックへ参加しないため、端末間の排他は保証しない。Python版は既存の適用前R2 snapshot再確認により、計画後から適用前までに別クライアントが行ったremote変更を競合として停止する
+- Python版はVault走査名、R2復号パス、stateキー、除外対象パスをUnicode NFCのVault相対パスへ統一する。NFC正規化後に複数のローカル名、remote object、またはstateキーが同一になる場合は競合または設定エラーとして停止し、自動上書きしない
+- Python版はR2一覧の復号後、ローカル走査に存在しない同期対象パスをVault上で直接再解決する。Files Providerの遅延列挙やUnicode表現差により既存ファイルを発見した場合はローカル走査結果へ補完し、新規PULLではなく既存ファイルとして内容比較する。補完件数を進捗と結果JSONへ表示する
 - Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import unicodedata
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
@@ -224,6 +225,127 @@ class PullProbeTests(unittest.TestCase):
             self.assertEqual(result["applied"], 0)
             self.assertEqual(save.call_count, 1)
             self.assertGreaterEqual(result["timingsMs"]["applyCheckpoint"], 0)
+
+    def test_nfd_local_path_matches_nfc_remote_and_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            nfc_path = "inbox/アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            self.assertNotEqual(nfc_path, nfd_path)
+            target = vault / Path(*nfd_path.split("/"))
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"same")
+            remote = FakeRemote({nfc_path: RemoteObject(b"same", "e1", {})})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["scannedLocal"], 1)
+            self.assertEqual(result["reconciledLocalFiles"], 0)
+            self.assertEqual(result["appliedByType"], {"SEED": 1})
+            self.assertEqual(set(load_state(state)), {nfc_path})
+            self.assertEqual(set(remote.objects), {nfc_path})
+
+    def test_existing_nfd_remote_key_is_reused_for_push(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            nfc_path = "inbox/アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            target = vault / Path(*nfd_path.split("/"))
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"local-new")
+            remote = FakeRemote({nfd_path: RemoteObject(b"remote-old", "e1", {})})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"PUSH": 1})
+            self.assertEqual(set(remote.objects), {nfd_path})
+            self.assertEqual(remote.objects[nfd_path].data, b"local-new")
+            self.assertEqual(set(load_state(state)), {nfc_path})
+
+    def test_remote_path_recovers_file_omitted_by_initial_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            target = vault / "late.md"
+            target.write_bytes(b"same")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"late.md": RemoteObject(b"same", "e1", {})})
+            messages = []
+
+            with mock.patch.object(pull_module, "_scan_vault", return_value={}):
+                result = execute_full_sync(
+                    vault, state, remote.list, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True, progress=messages.append,
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["scannedLocal"], 1)
+            self.assertEqual(result["reconciledLocalFiles"], 1)
+            self.assertEqual(result["appliedByType"], {"SEED": 1})
+            self.assertIn("local paths reconciled: 1件", messages)
+            self.assertFalse(any(
+                item.get("reason") == "target appeared during fetch"
+                for item in result["conflicts"]
+            ))
+
+    def test_state_rejects_paths_that_collide_after_nfc_normalization(self):
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "state.json"
+            nfc_path = "アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            state.write_text(json.dumps({"version": 1, "entries": {
+                nfc_path: {"remoteETag": "one"},
+                nfd_path: {"remoteETag": "two"},
+            }}, ensure_ascii=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(pull_module.PullError, "multiple state paths normalize"):
+                load_state(state)
+
+    def test_remote_paths_that_collide_after_nfc_normalization_stop_sync(self):
+        with tempfile.TemporaryDirectory() as root:
+            nfc_path = "アクアパッツア.md"
+            nfd_path = unicodedata.normalize("NFD", nfc_path)
+            remote = FakeRemote({
+                nfc_path: RemoteObject(b"one", "one", {}),
+                nfd_path: RemoteObject(b"two", "two", {}),
+            })
+
+            result = execute_full_sync(
+                Path(root) / "vault", Path(root) / "state.json",
+                remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["applied"], 0)
+            self.assertTrue(any(
+                item.get("reason") == "multiple remote objects decode to the same path"
+                for item in result["conflicts"]
+            ))
+
+    def test_local_paths_that_collide_after_nfc_normalization_stop_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            nfc_name = "アクアパッツア.md"
+            nfd_name = unicodedata.normalize("NFD", nfc_name)
+            (vault / nfc_name).write_bytes(b"one")
+            (vault / nfd_name).write_bytes(b"two")
+            if len(list(vault.iterdir())) < 2:
+                self.skipTest("filesystem does not permit distinct NFC and NFD names")
+
+            with self.assertRaisesRegex(pull_module.PullError, "multiple local paths normalize"):
+                _scan_vault(vault)
 
     def test_full_sync_prunes_large_and_binary_merge_bases_when_enabled(self):
         with tempfile.TemporaryDirectory() as root:

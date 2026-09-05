@@ -28,6 +28,7 @@ import re
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,7 +45,9 @@ REMOTE_OBJECT_DETAIL_LIMIT = 20
 
 
 def _sync_lock_path(vault: Path) -> Path:
-    identity = os.path.normcase(os.path.normpath(str(vault.expanduser().resolve())))
+    identity = unicodedata.normalize(
+        "NFC", os.path.normcase(os.path.normpath(str(vault.expanduser().resolve())))
+    )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     return Path(tempfile.gettempdir()) / f"r2-sync-{digest}.lock"
 
@@ -124,7 +127,7 @@ def _report_result(progress, result: dict) -> None:
     _emit_progress(progress, f"ok: {'true' if result.get('ok') else 'false'}")
     for name in (
         "planned", "unchanged", "validated", "applied", "seeded", "ignoredRemoteDeletes",
-        "mergeBasesPruned", "mergeBasesPendingPrune",
+        "reconciledLocalFiles", "mergeBasesPruned", "mergeBasesPendingPrune",
     ):
         if name in result:
             _emit_progress(progress, f"{name}: {result[name]}")
@@ -741,7 +744,7 @@ def _report_fetch_progress(progress, done: int, total: int) -> None:
 
 
 def _safe_relative(value: str) -> str:
-    normalized = value.replace("\\", "/")
+    normalized = unicodedata.normalize("NFC", value.replace("\\", "/"))
     path = PurePosixPath(normalized)
     if not normalized or path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
         raise PullError(f"unsafe relative path: {value!r}")
@@ -749,9 +752,32 @@ def _safe_relative(value: str) -> str:
 
 
 def _vault_path(vault: Path, rel_path: str) -> Path:
-    target = (vault / Path(*rel_path.split("/"))).resolve()
+    vault_resolved = vault.resolve()
+    target = vault
+    for part in _safe_relative(rel_path).split("/"):
+        try:
+            target.resolve().relative_to(vault_resolved)
+        except ValueError as error:
+            raise PullError(f"path escapes vault: {rel_path!r}") from error
+        direct = target / part
+        if os.path.lexists(direct):
+            target = direct
+            continue
+        matches = []
+        try:
+            with os.scandir(target) as entries:
+                matches = [
+                    Path(entry.path) for entry in entries
+                    if unicodedata.normalize("NFC", entry.name) == part
+                ]
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        if len(matches) > 1:
+            raise PullError(f"multiple local paths normalize to the same path: {rel_path!r}")
+        target = matches[0] if matches else direct
+    target = target.resolve()
     try:
-        target.relative_to(vault.resolve())
+        target.relative_to(vault_resolved)
     except ValueError as error:
         raise PullError(f"path escapes vault: {rel_path!r}") from error
     return target
@@ -759,7 +785,7 @@ def _vault_path(vault: Path, rel_path: str) -> Path:
 
 def _state_rel_path(vault: Path, state_path: Path) -> str | None:
     try:
-        return state_path.resolve().relative_to(vault.resolve()).as_posix()
+        return unicodedata.normalize("NFC", state_path.resolve().relative_to(vault.resolve()).as_posix())
     except ValueError:
         return None
 
@@ -772,7 +798,17 @@ def load_state(path: Path) -> dict:
         return {}
     if not isinstance(value, dict) or not isinstance(value.get("entries", {}), dict):
         raise PullError("state file has an invalid format")
-    return value["entries"]
+    entries = {}
+    raw_paths = {}
+    for raw_path, entry in value["entries"].items():
+        if not isinstance(raw_path, str):
+            raise PullError("state file has an invalid path")
+        rel_path = _safe_relative(raw_path)
+        if rel_path in entries and raw_paths[rel_path] != raw_path:
+            raise PullError(f"multiple state paths normalize to the same path: {rel_path!r}")
+        entries[rel_path] = entry
+        raw_paths[rel_path] = raw_path
+    return entries
 
 
 def save_state(path: Path, entries: dict) -> None:
@@ -998,12 +1034,15 @@ def _ignore_matcher(
     extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None
 ):
     """Return a gitignore-style glob matcher for vault-relative paths."""
-    protected = {path.replace("\\", "/").strip("/") for path in (protected_paths or []) if path}
+    protected = {
+        unicodedata.normalize("NFC", path.replace("\\", "/").strip("/"))
+        for path in (protected_paths or []) if path
+    }
     patterns = []
     for raw in extra_patterns or []:
         if not isinstance(raw, str):
             continue
-        value = raw.replace("\\", "/").strip()
+        value = unicodedata.normalize("NFC", raw.replace("\\", "/").strip())
         if not value:
             continue
         legacy_anchored = value.startswith("./")
@@ -1029,7 +1068,7 @@ def _ignore_matcher(
         return ["/".join(parts[:index + 1]) for index in range(len(parts))]
 
     def matches_extra(rel_path: str, is_file: bool) -> bool:
-        normalized = rel_path.replace("\\", "/").strip("/")
+        normalized = unicodedata.normalize("NFC", rel_path.replace("\\", "/").strip("/"))
         for item in patterns:
             pattern = item["pattern"]
             regex = item["regex"]
@@ -1049,10 +1088,12 @@ def _ignore_matcher(
         return False
 
     def ignored_dir(rel_path: str) -> bool:
+        rel_path = unicodedata.normalize("NFC", rel_path.replace("\\", "/").strip("/"))
         name = rel_path.rsplit("/", 1)[-1]
         return name in {".git", "node_modules"} or matches_extra(rel_path, False)
 
     def ignored_file(rel_path: str) -> bool:
+        rel_path = unicodedata.normalize("NFC", rel_path.replace("\\", "/").strip("/"))
         parts = rel_path.split("/")
         basename = parts[-1]
         parent = "/".join(parts[:-1])
@@ -1087,8 +1128,13 @@ def _scan_vault(
             entries = list(os.scandir(directory))
         except OSError as error:
             raise PullError(f"cannot scan vault: {directory}") from error
+        normalized_names = {}
         for entry in entries:
-            rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            entry_name = unicodedata.normalize("NFC", entry.name)
+            if entry_name in normalized_names and normalized_names[entry_name] != entry.name:
+                raise PullError(f"multiple local paths normalize to the same path: {rel_dir}/{entry_name}")
+            normalized_names[entry_name] = entry.name
+            rel_path = f"{rel_dir}/{entry_name}" if rel_dir else entry_name
             if entry.is_dir(follow_symlinks=False):
                 if not ignored_dir(rel_path):
                     walk(Path(entry.path), rel_path)
@@ -1108,6 +1154,22 @@ def _scan_vault(
     return result
 
 
+def _reconcile_local_files(vault: Path, local: dict[str, dict], remote_paths) -> int:
+    """Recover existing files omitted by directory enumeration or Unicode spelling differences."""
+    recovered = 0
+    for rel_path in sorted(set(remote_paths) - set(local)):
+        target = _vault_path(vault, rel_path)
+        if not target.is_file():
+            continue
+        try:
+            stat = target.stat()
+        except OSError as error:
+            raise PullError(f"cannot stat vault file: {rel_path}") from error
+        local[rel_path] = {"mtimeMs": stat.st_mtime_ns / 1_000_000, "size": stat.st_size}
+        recovered += 1
+    return recovered
+
+
 def _classify_vault_paths(
     vault: Path, extra_patterns: list[str] | None = None, protected_paths: list[str] | None = None,
     verbose: bool = False,
@@ -1122,8 +1184,13 @@ def _classify_vault_paths(
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError as error:
             raise PullError(f"cannot scan vault: {directory}") from error
+        normalized_names = {}
         for entry in entries:
-            rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            entry_name = unicodedata.normalize("NFC", entry.name)
+            if entry_name in normalized_names and normalized_names[entry_name] != entry.name:
+                raise PullError(f"multiple local paths normalize to the same path: {rel_dir}/{entry_name}")
+            normalized_names[entry_name] = entry.name
+            rel_path = f"{rel_dir}/{entry_name}" if rel_dir else entry_name
             if entry.is_dir(follow_symlinks=False):
                 directory_ignored = inherited_ignore or ignored_dir(rel_path)
                 if directory_ignored:
@@ -1441,6 +1508,8 @@ def execute_full(
         raw["key"] = key
         remotes[rel_path] = raw
 
+    reconciled_local_files = _reconcile_local_files(vault, local, remotes)
+
     scan_ms = round((time.perf_counter() - started) * 1000, 2)
     conflicts = []
     actions = []
@@ -1528,6 +1597,7 @@ def execute_full(
         "ok": True, "mode": "apply" if apply else "dry-run", "scannedLocal": len(local),
         "scannedRemote": len(listed), "planned": len(fetch_actions), "validated": len(prepared) + len(seed_actions),
         "applied": 0, "seeded": 0, "ignoredRemoteDeletes": ignored_remote_deletes,
+        "reconciledLocalFiles": reconciled_local_files,
         "ignoredRemoteObjects": ignored_remote, "errors": [], "conflicts": [],
         "timingsMs": {"scan": scan_ms, "conflictCheck": conflict_check_ms, "fetchValidate": fetch_validate_ms, "apply": 0},
     }
@@ -1631,10 +1701,15 @@ def execute_full_sync(
         listed, decoder, remote_prefix, extra_patterns, protected_paths
     )
     decode_remote_ms = round((time.perf_counter() - decode_remote_started) * 1000, 2)
+    reconcile_local_started = time.perf_counter()
+    reconciled_local_files = _reconcile_local_files(vault, local, remotes)
+    reconcile_local_ms = round((time.perf_counter() - reconcile_local_started) * 1000, 2)
     _emit_progress(
         progress,
         f"local files: {len(local)}件 / remote objects: {len(listed)}件 / 前回状態: {len(previous)}件",
     )
+    if reconciled_local_files:
+        _emit_progress(progress, f"local paths reconciled: {reconciled_local_files}件")
     scan_finished = time.perf_counter()
     scan_ms = round((scan_finished - started) * 1000, 2)
     actions = []
@@ -1703,7 +1778,7 @@ def execute_full_sync(
             if prev.get("localContentHash") and hashlib.sha256(local_bytes).hexdigest() == prev["localContentHash"]:
                 actions.append({"type": "SEED", "path": rel_path, "remote": remote, "localBytes": local_bytes, "reason": "mtime変化のみ・内容一致のため転送スキップ"})
             else:
-                actions.append({"type": "PUSH", "path": rel_path, "localBytes": local_bytes, "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
+                actions.append({"type": "PUSH", "path": rel_path, "remote": remote, "localBytes": local_bytes, "localMtimeMs": local[rel_path]["mtimeMs"], "enabled": push})
         elif remote_is_changed:
             candidates.append({"type": "REMOTE_CHANGED", "path": rel_path, "remote": remote, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local[rel_path]["mtimeMs"]})
         else:
@@ -1745,7 +1820,7 @@ def execute_full_sync(
             elif candidate["type"] == "BOOTSTRAP":
                 remote_mtime = _remote_mtime_ms(remote_object, remote_info)
                 if candidate["localMtimeMs"] > remote_mtime and push:
-                    actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "初回比較: 内容不一致・ローカルの方が新しいため上書き"})
+                    actions.append({"type": "PUSH", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "初回比較: 内容不一致・ローカルの方が新しいため上書き"})
                 elif candidate["localMtimeMs"] > remote_mtime:
                     conflicts.append({"path": path_name, "reason": "local is newer on bootstrap and PUSH is disabled"})
                 else:
@@ -1766,7 +1841,7 @@ def execute_full_sync(
                         continue
                     actions.append({"type": "MERGE", "path": path_name, "remote": remote_info, "data": merged, "localMtimeMs": max(candidate["localMtimeMs"], _remote_mtime_ms(remote_object, remote_info)), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "remoteBytes": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "reason": "両側変更・3-way merge"})
                 elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info) and push:
-                    actions.append({"type": "PUSH", "path": path_name, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "両側変更・ローカルの方が新しいため上書き"})
+                    actions.append({"type": "PUSH", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "localMtimeMs": candidate["localMtimeMs"], "enabled": True, "reason": "両側変更・ローカルの方が新しいため上書き"})
                 elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info):
                     conflicts.append({"path": path_name, "reason": "both sides changed and PUSH is disabled"})
                 else:
@@ -1783,7 +1858,8 @@ def execute_full_sync(
         "ok": not conflicts and not errors,
         "mode": "apply" if apply else "dry-run", "unchanged": unchanged,
         "scannedLocal": len(local), "scannedRemote": len(listed), "planned": len(applicable_actions), "validated": prepared_count,
-        "applied": 0, "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
+        "applied": 0, "reconciledLocalFiles": reconciled_local_files,
+        "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
         "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
         "remoteSnapshotRechecked": False,
         "fetchConcurrency": fetch_concurrency,
@@ -1791,7 +1867,8 @@ def execute_full_sync(
         "plannedByType": counts, "appliedByType": {}, "skippedByType": {},
         "timingsMs": {
             "scan": scan_ms, "scanLocal": scan_local_ms, "listRemote": list_remote_ms,
-            "decodeRemote": decode_remote_ms, "conflictCheck": conflict_check_ms,
+            "decodeRemote": decode_remote_ms, "reconcileLocal": reconcile_local_ms,
+            "conflictCheck": conflict_check_ms,
             "fetchValidate": fetch_validate_ms, "snapshotCheck": 0, "apply": 0,
             "applyRemote": 0, "applyCheckpoint": 0,
         },
