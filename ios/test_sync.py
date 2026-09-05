@@ -385,17 +385,22 @@ class PullProbeTests(unittest.TestCase):
             verbose_stdout = io.StringIO()
             checked_stdout = io.StringIO()
 
-            with mock.patch.object(pull_module, "R2Client", side_effect=AssertionError("R2 must not be used")):
-                with redirect_stdout(listed_stdout), redirect_stderr(io.StringIO()):
-                    list_exit = pull_module.main(["--config", str(config), "--check-ignore"])
-                with redirect_stdout(verbose_stdout), redirect_stderr(io.StringIO()):
-                    verbose_exit = pull_module.main([
-                        "--config", str(config), "--verbose", "--check-ignore",
-                    ])
-                with redirect_stdout(checked_stdout), redirect_stderr(io.StringIO()):
-                    check_exit = pull_module.main([
-                        "--config", str(config), "--check-ignore", "ignored/file.txt", "keep.txt",
-                    ])
+            held_lock = pull_module._SyncRunLock(vault)
+            held_lock.acquire()
+            try:
+                with mock.patch.object(pull_module, "R2Client", side_effect=AssertionError("R2 must not be used")):
+                    with redirect_stdout(listed_stdout), redirect_stderr(io.StringIO()):
+                        list_exit = pull_module.main(["--config", str(config), "--check-ignore"])
+                    with redirect_stdout(verbose_stdout), redirect_stderr(io.StringIO()):
+                        verbose_exit = pull_module.main([
+                            "--config", str(config), "--verbose", "--check-ignore",
+                        ])
+                    with redirect_stdout(checked_stdout), redirect_stderr(io.StringIO()):
+                        check_exit = pull_module.main([
+                            "--config", str(config), "--check-ignore", "ignored/file.txt", "keep.txt",
+                        ])
+            finally:
+                held_lock.release()
 
             self.assertEqual(list_exit, 0)
             self.assertIn("ignoreExtra: 2 patterns", listed_stdout.getvalue())
@@ -422,6 +427,59 @@ class PullProbeTests(unittest.TestCase):
             self.assertIn("[IGNORE] ignored/file.txt", checked_stdout.getvalue())
             self.assertIn("[INCLUDE] keep.txt", checked_stdout.getvalue())
             self.assertFalse(state.exists())
+
+    def test_main_rejects_concurrent_sync_before_r2_and_releases_lock_after_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            vault = root_path / "vault"
+            vault.mkdir()
+            state = root_path / "state.json"
+            config = root_path / "config.json"
+            config.write_text(json.dumps({
+                "vaultPath": str(vault),
+                "statePath": str(state),
+                "endpoint": "https://<account-id>.r2.cloudflarestorage.com",
+                "bucket": "<bucket-name>",
+                "accessKeyId": "key",
+                "secretAccessKey": "secret",
+                "mode": "full",
+            }), encoding="utf-8")
+            held_lock = pull_module._SyncRunLock(vault)
+            held_lock.acquire()
+            try:
+                stdout = io.StringIO()
+                with mock.patch.object(
+                    pull_module, "R2Client", side_effect=AssertionError("R2 must not be used")
+                ):
+                    with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                        exit_code = pull_module.main(["--config", str(config)])
+            finally:
+                held_lock.release()
+
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["errors"], [{
+                "error": "another sync is already running for this vault",
+            }])
+            self.assertFalse(state.exists())
+
+            with mock.patch.object(pull_module, "R2Client", side_effect=pull_module.PullError("client failed")):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(pull_module.main(["--config", str(config)]), 1)
+
+            next_lock = pull_module._SyncRunLock(vault)
+            next_lock.acquire()
+            next_lock.release()
+
+            with mock.patch.object(pull_module, "R2Client", side_effect=KeyboardInterrupt):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    with self.assertRaises(KeyboardInterrupt):
+                        pull_module.main(["--config", str(config)])
+
+            after_interrupt_lock = pull_module._SyncRunLock(vault)
+            after_interrupt_lock.acquire()
+            after_interrupt_lock.release()
 
     def test_config_rejects_unsafe_performance_option_types(self):
         with tempfile.TemporaryDirectory() as root:

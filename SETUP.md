@@ -120,6 +120,8 @@ just check-ignore-path <config-path> <vault-relative-path>
 
 full syncは全走査・全列挙を行う。`--apply`でPUSH/PULL/自動mergeを実行し、`--allow-delete`を追加するとremote/local削除も実行する。設定JSONの`mode`を省略するか`probe`にすると、`files`に指定した1〜2個だけを対象にする既存PULL Probe互換モードになる。PUSHには書き込み権限、削除には削除権限を持つテスト用R2キーを使い、実R2へ向ける前にテストデータで確認する。
 
+同じ端末・同じ利用者から同一Vaultへ`sync.py`を重ねて起動した場合、後から起動した処理はR2へ接続せず、`another sync is already running for this vault`エラーで即時終了する。ロック待機はせず、強制終了後も次回実行を妨げない。Node版や別端末との排他ロックではないため、複数の同期クライアントを使う場合は従来どおり実行タイミングを分ける。
+
 実行中はNode版と同じ形式で、Vault・モード、走査件数、action別計画と対象パス、取得・検証／適用進捗、最終結果がa-Shellへ表示される。人向け進捗は標準エラー、Shortcutsが受け取る整形済み最終JSONは標準出力へ分離して出力される。JSONは複数行だが、Shortcuts側では通常どおりJSONとして解析できる。
 
 stateが添付ファイルのmerge baseで大きくなる場合は、設定へ`"textMergeBaseMaxBytes": 1048576`を追加すると、1MiB以下のUTF-8テキストだけbaseを保持する。画像・PDF・大容量テキストなどbaseを保持しないファイルが両側変更された場合は、上書きせず競合停止する。未指定では従来どおり全内容を保持する。

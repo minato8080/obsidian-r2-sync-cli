@@ -16,6 +16,7 @@ import base64
 import concurrent.futures
 import datetime as _datetime
 import difflib
+import errno
 import functools
 import hashlib
 import hmac
@@ -38,6 +39,62 @@ MAGIC = b"RCLONE\x00\x00"
 BLOCK_DATA_SIZE = 64 * 1024
 BLOCK_TAG_SIZE = 16
 HEADER_SIZE = len(MAGIC) + 24
+
+
+def _sync_lock_path(vault: Path) -> Path:
+    identity = os.path.normcase(os.path.normpath(str(vault.expanduser().resolve())))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / f"r2-sync-{digest}.lock"
+
+
+class _SyncRunLock:
+    """Non-blocking process lock for sync runs that target the same local vault."""
+
+    def __init__(self, vault: Path):
+        self.path = _sync_lock_path(vault)
+        self._stream = None
+
+    def acquire(self) -> None:
+        try:
+            stream = self.path.open("a+b")
+        except OSError as error:
+            raise PullError("cannot open sync lock") from error
+        try:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            stream.close()
+            if error.errno in (errno.EACCES, errno.EAGAIN) or getattr(error, "winerror", None) in (33, 36):
+                raise PullError("another sync is already running for this vault") from error
+            raise PullError("cannot acquire sync lock") from error
+        self._stream = stream
+
+    def release(self) -> None:
+        stream = self._stream
+        if stream is None:
+            return
+        self._stream = None
+        try:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            stream.close()
 
 
 def _emit_progress(progress, message: str) -> None:
@@ -1982,6 +2039,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--merge", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     progress = lambda message: print(message, file=sys.stderr, flush=True)
+    run_lock = None
     try:
         config_path = Path(args.config).expanduser().resolve()
         config = _load_config(config_path)
@@ -2026,6 +2084,8 @@ def main(argv: list[str] | None = None) -> int:
                     suffix = f" ({_format_count(count, 'file')})" if count is not None else ""
                     print(f"  {rel_path}{suffix}")
             return 0
+        run_lock = _SyncRunLock(vault_path)
+        run_lock.acquire()
         mode = config.get("encryption", "rclone-base64")
         if mode not in ("rclone-base64", "plain"):
             raise PullError("encryption must be rclone-base64 or plain")
@@ -2072,6 +2132,9 @@ def main(argv: list[str] | None = None) -> int:
         _report_result(progress, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
+    finally:
+        if run_lock is not None:
+            run_lock.release()
 
 
 if __name__ == "__main__":

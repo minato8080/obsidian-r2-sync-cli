@@ -103,6 +103,8 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する
 - `recheckRemoteBeforeApply`は真偽値とし、既定値は`true`とする。明示的に`false`を指定した場合だけ適用直前のR2再一覧を省略し、警告と結果JSONのフラグで安全確認を省略したことを示す
 - Python版の並列取得中にCtrl+Cを受けた場合は、未開始タスクを取り消してworker待機をせず終了する。取得・検証段階ではVault、R2、stateを変更しない
+- Python版の同期実行は、正規化したVaultパス単位の非待機OSロックをR2接続前に取得し、処理終了まで保持する。同一端末・同一利用者から同じVaultへの別実行が進行中なら、待機せずエラー結果と終了コード1を返し、Vault、R2、stateを変更しない。ロックは正常終了、例外、Ctrl+C、プロセス終了時に解放され、ロック用ファイルはVault外の一時領域へ置く。読み取り専用の`--check-ignore`はロック対象外とする
+- Node版および別端末の同期処理はPython版のOSロックへ参加しないため、端末間の排他は保証しない。Python版は既存の適用前R2 snapshot再確認により、計画後から適用前までに別クライアントが行ったremote変更を競合として停止する
 - Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
 - 既存の`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして互換維持する
