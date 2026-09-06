@@ -47,7 +47,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - 状態形式はPC版と互換にするが、端末ごとの状態ファイルは共有しない
 - 取得物は一時ファイルへ保存し、検証後に原子的置換を行う
 - R2のmtimeをローカルへ復元する
-- 競合が1件でもあれば、ファイル適用前に同期全体を中止する
+- Python full modeは競合したパスだけを適用対象外にし、独立した非競合パスの同期を継続する。結果は競合が残るため`ok: false`とするが、成功した操作数とcheckpointを返す。R2一覧取得不能など対象パスを特定できない全体エラーは変更前に同期全体を中止する
 - 取得・書き込みの失敗時は既存ファイルを壊さない
 - 初回または状態消失時はDry Runで差分確認してから適用する。両側に存在するファイルは内容一致ならSEED、不一致ならmtime判定または自動mergeを行う
 - テストR2バケットと読み取り専用キーを使用し、本番データへ直接Probeしない
@@ -114,7 +114,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `prefer-nfc`で同期対象外にしたUnicode aliasの総数を`unicodeAliasesIgnored`として進捗と結果JSONへ表示する。明示設定はaliasの削除や内容統合を行わない
 - Python版はR2一覧の復号後、ローカル走査に存在しない同期対象パスをVault上で直接再解決する。Files Providerの遅延列挙やUnicode表現差により既存ファイルを発見した場合はローカル走査結果へ補完し、新規PULLではなく既存ファイルとして内容比較する。補完件数を進捗と結果JSONへ表示する
 - Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
-- stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず全体を中止する
+- stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず、そのパスだけをskipして他の非競合パスを適用する
 - `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
 
 ## 関連

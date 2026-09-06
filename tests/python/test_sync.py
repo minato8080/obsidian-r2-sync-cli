@@ -409,7 +409,7 @@ class SyncWorkflowTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), expected)
             self.assertEqual(remote.objects["note.md"].data, expected.encode())
 
-    def test_full_sync_merge_conflict_aborts_without_mutation(self):
+    def test_full_sync_merge_conflict_leaves_conflicting_path_unmodified(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"
             state = Path(root) / "state.json"
@@ -427,6 +427,89 @@ class SyncWorkflowTests(unittest.TestCase):
             self.assertTrue(result["conflicts"])
             self.assertEqual(target.read_text(encoding="utf-8"), "local\n")
             self.assertEqual(remote.objects["note.md"].data, before_remote)
+
+    def test_full_sync_applies_non_conflicting_paths_around_merge_conflict(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            state = Path(root) / "state.json"
+            vault.mkdir()
+            home = vault / "home.md"
+            home.write_text("base\n", encoding="utf-8")
+            remote = FakeRemote({"home.md": RemoteObject(b"base\n", "base", {})})
+            self.assertTrue(execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True,
+            )["ok"])
+
+            home.write_text("local\n", encoding="utf-8")
+            (vault / "push.md").write_text("push\n", encoding="utf-8")
+            remote.objects["home.md"] = RemoteObject(b"remote\n", "remote-new", {})
+            remote.objects["pull.md"] = RemoteObject(b"pull\n", "pull-new", {})
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, remote.put, remote.delete,
+                PlainContent(), apply=True, push=True, merge=True,
+                apply_concurrency=2, recheck_remote_before_apply=False,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["plannedByType"], {"PUSH": 1, "PULL": 1})
+            self.assertEqual(result["appliedByType"], {"PUSH": 1, "PULL": 1})
+            self.assertEqual(result["applied"], 2)
+            self.assertEqual(result["conflicts"], [{
+                "path": "home.md", "reason": "three-way merge conflict"
+            }])
+            self.assertEqual(home.read_text(encoding="utf-8"), "local\n")
+            self.assertEqual(remote.objects["home.md"].data, b"remote\n")
+            self.assertEqual(remote.objects["push.md"].data, (vault / "push.md").read_bytes())
+            self.assertEqual((vault / "pull.md").read_bytes(), b"pull\n")
+            self.assertEqual(set(load_state(state)), {"home.md", "push.md", "pull.md"})
+
+    def test_unscoped_remote_list_conflict_still_aborts_all_mutations(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "local.md").write_bytes(b"local")
+            put = mock.Mock()
+
+            result = execute_full_sync(
+                vault, Path(root) / "state.json", lambda prefix: [{"size": 1}],
+                mock.Mock(), put, mock.Mock(), PlainContent(), apply=True, push=True,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["applied"], 0)
+            put.assert_not_called()
+
+    def test_snapshot_conflict_skips_only_changed_remote_path(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "safe.md").write_bytes(b"safe-local")
+            (vault / "changed.md").write_bytes(b"changed-local")
+            remote = FakeRemote({})
+            list_count = 0
+
+            def list_remote(prefix=""):
+                nonlocal list_count
+                list_count += 1
+                if list_count == 2:
+                    remote.objects["changed.md"] = RemoteObject(
+                        b"concurrent-remote", "concurrent", {}
+                    )
+                return remote.list(prefix)
+
+            result = execute_full_sync(
+                vault, Path(root) / "state.json", list_remote,
+                remote.get, remote.put, remote.delete, PlainContent(),
+                apply=True, push=True, apply_concurrency=2,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["applied"], 1)
+            self.assertEqual(result["skippedByType"], {"PUSH": 1})
+            self.assertEqual(remote.objects["safe.md"].data, b"safe-local")
+            self.assertEqual(remote.objects["changed.md"].data, b"concurrent-remote")
 
 
 if __name__ == "__main__":

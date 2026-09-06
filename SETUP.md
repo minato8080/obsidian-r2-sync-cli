@@ -142,6 +142,6 @@ Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、R2へのPU
 
 ## 実行のたびに確認すること
 
-- 両側で変更されたUTF-8テキストは、stateにmerge baseがあれば3-way mergeする。同じ行の変更、baseなし、またはバイナリでは全体を競合停止し、どちらの内容も上書きしない。
+- 両側で変更されたUTF-8テキストは、stateにmerge baseがあれば3-way mergeする。同じ行の変更、baseなし、またはバイナリではそのパスを競合としてskipし、どちらの内容も上書きしない。他の非競合パスは適用を継続し、未解決競合が残るため結果は`ok: false`になる。
 - `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは設定へ明示すること（Node.js版は`.env.example`、Python版は`py/config.example.json`と各設計書を参照）。指定を忘れると同期される。
 - ignoreパターンは設定ファイルのあるディレクトリを基準にしたGitignore風glob。専用フォルダに実行ファイルと設定をまとめた場合は`/**`でその配下をすべて除外できる。`/sync.py`は設定ファイルと同じディレクトリ直下、`sync.py`は配下の全階層に一致する。`./sync.py`は旧設定互換で`/sync.py`と同じ。

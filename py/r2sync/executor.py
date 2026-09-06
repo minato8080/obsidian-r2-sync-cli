@@ -405,11 +405,33 @@ def execute_full_sync(
         result["timingsMs"]["applyRemote"] = round(apply_remote_seconds * 1000, 2)
         result["timingsMs"]["applyCheckpoint"] = round(apply_checkpoint_seconds * 1000, 2)
 
-    if conflicts or errors or not apply:
+    def exclude_conflicted_actions(actions: list[dict], paths: set[str]) -> list[dict]:
+        if not paths:
+            return actions
+        retained = []
+        for action in actions:
+            if action["path"] not in paths:
+                retained.append(action)
+                continue
+            action_type = action["type"]
+            result["skippedByType"][action_type] = result["skippedByType"].get(action_type, 0) + 1
+        result["ok"] = False
+        return retained
+
+    def has_unscoped_conflict(items: list[dict]) -> bool:
+        return any(item.get("path") == "<remote-list>" for item in items)
+
+    if errors or not apply or has_unscoped_conflict(result["conflicts"]):
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
+    applicable_actions = exclude_conflicted_actions(
+        applicable_actions,
+        {item.get("path") for item in result["conflicts"] if isinstance(item.get("path"), str)},
+    )
+
     # Recheck local state for every operation before the first remote or local mutation.
+    preflight_conflict_paths = set()
     for action in applicable_actions:
         path_name = action["path"]
         target = _vault_path(vault, path_name)
@@ -417,25 +439,31 @@ def execute_full_sync(
             expected_hash = action.get("localSnapshotHash") or hashlib.sha256(action.get("localBytes", b"")).hexdigest()
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
                 result["conflicts"].append({"path": path_name, "reason": "local file changed during planning"})
+                preflight_conflict_paths.add(path_name)
         elif action["type"] == "PULL":
             if action.get("hadLocal"):
                 expected_hash = action.get("localSnapshotHash")
                 if not expected_hash or not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
                     result["conflicts"].append({"path": path_name, "reason": "local file changed during fetch"})
+                    preflight_conflict_paths.add(path_name)
             elif target.exists():
                 result["conflicts"].append({"path": path_name, "reason": "target appeared during fetch"})
+                preflight_conflict_paths.add(path_name)
         elif action["type"] == "DELETE_LOCAL" and action.get("localSnapshotHash"):
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != action["localSnapshotHash"]:
                 result["conflicts"].append({"path": path_name, "reason": "local file changed during planning"})
+                preflight_conflict_paths.add(path_name)
         elif action["type"] in ("DELETE_REMOTE", "FORGET") and target.exists():
             result["conflicts"].append({"path": path_name, "reason": "local file appeared during planning"})
-    if result["conflicts"]:
-        result["ok"] = False
-        result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
-        return result
+            preflight_conflict_paths.add(path_name)
+    applicable_actions = exclude_conflicted_actions(applicable_actions, preflight_conflict_paths)
 
     if not applicable_actions:
-        _emit_progress(progress, "適用対象の変更はありません。")
+        _emit_progress(
+            progress,
+            "競合以外に適用可能な変更はありません。"
+            if result["conflicts"] else "適用対象の変更はありません。",
+        )
         if state_dirty:
             apply_started = time.perf_counter()
             try:
@@ -447,8 +475,10 @@ def execute_full_sync(
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
-    # A second full listing closes the fetch/validation window.  Any change in
-    # the remote snapshot aborts the whole batch before its first mutation.
+    # A second full listing closes the fetch/validation window. Paths changed
+    # since planning are excluded while independent actions remain applicable.
+    snapshot_conflict_paths = set()
+    latest_conflicts = []
     if recheck_remote_before_apply:
         _emit_progress(progress, "R2 snapshotを再確認しています...")
         snapshot_started = time.perf_counter()
@@ -459,6 +489,9 @@ def execute_full_sync(
                 unicode_collision_policy,
             )
             result["conflicts"].extend(latest_conflicts)
+            snapshot_conflict_paths.update(
+                item.get("path") for item in latest_conflicts if isinstance(item.get("path"), str)
+            )
             snapshot_paths = sorted(set(remotes) | set(latest_remotes))
             for path_name in snapshot_paths:
                 before = remotes.get(path_name)
@@ -467,6 +500,7 @@ def execute_full_sync(
                 after_identity = None if after is None else (after.get("key"), after.get("etag"), after.get("size"), after.get("lastModified"))
                 if before_identity != after_identity:
                     result["conflicts"].append({"path": path_name, "reason": "remote object changed during planning"})
+                    snapshot_conflict_paths.add(path_name)
             result["remoteSnapshotRechecked"] = True
         except Exception as error:
             result["errors"].append({"path": "<remote-list>", "error": str(error)})
@@ -474,8 +508,22 @@ def execute_full_sync(
             result["timingsMs"]["snapshotCheck"] = round((time.perf_counter() - snapshot_started) * 1000, 2)
     else:
         _emit_progress(progress, "警告: 適用前のR2 snapshot再確認をスキップします。")
-    if result["conflicts"] or result["errors"]:
+    if result["errors"] or has_unscoped_conflict(latest_conflicts):
         result["ok"] = False
+        result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
+        return result
+    applicable_actions = exclude_conflicted_actions(applicable_actions, snapshot_conflict_paths)
+
+    if not applicable_actions:
+        _emit_progress(progress, "競合以外に適用可能な変更はありません。")
+        if state_dirty:
+            apply_started = time.perf_counter()
+            try:
+                persist_entries()
+            except Exception as error:
+                result["ok"] = False
+                result["errors"].append({"path": "<state>", "error": str(error)})
+            finish_apply_timing(apply_started)
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
@@ -580,7 +628,7 @@ def execute_full_sync(
         except Exception as error:
             result["ok"] = False
             result["errors"].append({"path": "<state>", "error": str(error)})
-    if result["errors"] or result["conflicts"]:
+    if result["errors"]:
         finish_apply_timing(apply_started)
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result

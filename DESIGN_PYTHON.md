@@ -80,7 +80,7 @@ entryは共有fieldに加え、3-way merge用の`baseContentBase64`を持てる�
 
 ## 同期計画
 
-基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしはconflictとして全体を適用前に停止する。
+基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしはconflictとして対象パスをactionから除外する。他パスのactionは適用し、最終結果は未解決競合を示す`ok=false`とする。
 
 計画処理は次の段階に分ける。
 
@@ -98,6 +98,7 @@ NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoi
 
 - dry-runは取得・検証まで行えるが、Vault、R2、checkpointを変更しない。
 - 全candidateの取得・復号・競合判定を完了してから最初のmutationを行う。
+- 計画時のmerge競合、適用前local再検証、remote snapshot再確認で競合したパスはactionから除外し、相互に独立した他パスを適用する。対象パスを特定できない全体エラーはmutation前に中止する。
 - PULLは同一directoryのtemp fileをfsyncし、mtimeを設定してから`os.replace`する。
 - PUSHはbatch内の全future確定後、成功分を1回のcheckpointへ保存する。一部失敗時も成功分を保存し、以降の非PUSH操作は行わない。強制終了でbatch checkpoint前に停止した場合は、次回実行でremoteとの差分を再評価する。
 - DELETE_REMOTEはR2成功後、PULL/DELETE_LOCALはlocal成功後にcheckpointする。
