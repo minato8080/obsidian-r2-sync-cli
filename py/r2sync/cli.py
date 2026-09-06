@@ -147,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             raise PullError("encryption must be rclone-base64 or plain")
         decoder = RcloneBase64(config.get("password", "")) if mode == "rclone-base64" else PlainContent()
         fetch_concurrency = config.get("fetchConcurrency", 2)
+        apply_concurrency = config.get("applyConcurrency", 1)
         request_timeout = config.get("requestTimeoutSeconds", 30)
         r2 = R2Client(
             config["endpoint"], config["bucket"], config["accessKeyId"], config["secretAccessKey"],
@@ -157,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
         full = config["mode"] == "full"
         progress(f"vault: {config['vaultPath']}")
         progress(f"mode: {'APPLY (削除含む)' if args.apply and args.allow_delete else 'APPLY (削除は警告のみ)' if args.apply else 'DRY-RUN'}")
-        progress(f"fetch concurrency: {fetch_concurrency} / request timeout: {request_timeout}秒")
+        progress(
+            f"fetch concurrency: {fetch_concurrency} / apply concurrency: {apply_concurrency} "
+            f"/ request timeout: {request_timeout}秒"
+        )
         progress(f"unicode collision policy: {unicode_collision_policy}")
         if full:
             result = execute_full_sync(
@@ -168,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                 text_merge_base_max_bytes=config.get("textMergeBaseMaxBytes"),
                 recheck_remote_before_apply=config.get("recheckRemoteBeforeApply", True),
                 fetch_concurrency=fetch_concurrency,
+                apply_concurrency=apply_concurrency,
                 unicode_collision_policy=unicode_collision_policy,
                 progress=progress,
             )

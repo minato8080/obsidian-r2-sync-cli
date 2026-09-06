@@ -47,6 +47,9 @@ def _load_config(path: Path) -> dict:
     fetch_concurrency = config.get("fetchConcurrency", 2)
     if isinstance(fetch_concurrency, bool) or not isinstance(fetch_concurrency, int) or not 1 <= fetch_concurrency <= 16:
         raise PullError("fetchConcurrency must be an integer from 1 to 16")
+    apply_concurrency = config.get("applyConcurrency", 1)
+    if isinstance(apply_concurrency, bool) or not isinstance(apply_concurrency, int) or not 1 <= apply_concurrency <= 16:
+        raise PullError("applyConcurrency must be an integer from 1 to 16")
     request_timeout = config.get("requestTimeoutSeconds", 30)
     if isinstance(request_timeout, bool) or not isinstance(request_timeout, (int, float)) or not 1 <= request_timeout <= 300:
         raise PullError("requestTimeoutSeconds must be a number from 1 to 300")

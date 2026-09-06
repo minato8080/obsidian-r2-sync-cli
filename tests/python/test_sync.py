@@ -64,6 +64,115 @@ class SyncWorkflowTests(unittest.TestCase):
             self.assertEqual(save.call_count, 1)
             self.assertGreaterEqual(result["timingsMs"]["applyCheckpoint"], 0)
 
+    def test_full_sync_batches_push_and_seed_in_one_state_checkpoint(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "seed.txt").write_bytes(b"same")
+            (vault / "push.txt").write_bytes(b"local")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({"seed.txt": RemoteObject(b"same", "seed-etag", {})})
+
+            with mock.patch.object(executor_module, "save_state", wraps=checkpoint_module.save_state) as save:
+                result = execute_full_sync(
+                    vault, state, remote.list, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True, apply_concurrency=4,
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"SEED": 1, "PUSH": 1})
+            self.assertEqual(result["applied"], 1)
+            self.assertEqual(save.call_count, 1)
+            self.assertEqual(set(load_state(state)), {"seed.txt", "push.txt"})
+
+    def test_full_sync_uses_apply_concurrency_for_push_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "one.txt").write_bytes(b"one")
+            (vault / "two.txt").write_bytes(b"two")
+            remote = FakeRemote({})
+            messages = []
+
+            with mock.patch.object(
+                executor_module, "_run_parallel", wraps=executor_module._run_parallel
+            ) as run_parallel:
+                result = execute_full_sync(
+                    vault, Path(root) / "state.json",
+                    remote.list, remote.get, remote.put, remote.delete,
+                    PlainContent(), apply=True, push=True, apply_concurrency=4,
+                    progress=messages.append,
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["applyConcurrency"], 4)
+            mutation_calls = [
+                call for call in run_parallel.call_args_list
+                if call.kwargs.get("wait_on_interrupt")
+            ]
+            self.assertEqual(len(mutation_calls), 1)
+            args, kwargs = mutation_calls[0]
+            self.assertEqual(args[2], 4)
+            self.assertTrue(kwargs["wait_on_interrupt"])
+            rendered = "\n".join(messages)
+            self.assertIn("R2へPUSHしています(並列2件)", rendered)
+            self.assertIn("PUSH中: 2/2", rendered)
+
+    def test_parallel_push_failure_checkpoints_successes_once_and_stops(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            (vault / "good.txt").write_bytes(b"good")
+            (vault / "bad.txt").write_bytes(b"bad")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({})
+
+            def put(key, data, mtime_ms):
+                if key == "bad.txt":
+                    raise OSError("upload failed")
+                return remote.put(key, data, mtime_ms)
+
+            with mock.patch.object(executor_module, "save_state", wraps=checkpoint_module.save_state) as save:
+                result = execute_full_sync(
+                    vault, state, remote.list, remote.get, put, remote.delete,
+                    PlainContent(), apply=True, push=True, apply_concurrency=2,
+                )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["applied"], 1)
+            self.assertEqual(save.call_count, 1)
+            self.assertEqual(set(load_state(state)), {"good.txt"})
+            self.assertIn("good.txt", remote.objects)
+            self.assertNotIn("bad.txt", remote.objects)
+
+    def test_local_change_during_parallel_push_is_not_checkpointed(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            target = vault / "note.txt"
+            target.write_bytes(b"planned")
+            state = Path(root) / "state.json"
+            remote = FakeRemote({})
+
+            def put(key, data, mtime_ms):
+                etag = remote.put(key, data, mtime_ms)
+                target.write_bytes(b"changed-during-push")
+                return etag
+
+            result = execute_full_sync(
+                vault, state, remote.list, remote.get, put, remote.delete,
+                PlainContent(), apply=True, push=True, apply_concurrency=2,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["applied"], 1)
+            self.assertEqual(result["conflicts"], [{
+                "path": "note.txt", "reason": "local file changed during push"
+            }])
+            self.assertNotIn("note.txt", load_state(state))
+            self.assertEqual(remote.objects["note.txt"].data, b"planned")
+            self.assertEqual(target.read_bytes(), b"changed-during-push")
+
     def test_local_deleted_remote_changed_pull_has_payload(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"

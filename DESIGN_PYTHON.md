@@ -48,7 +48,7 @@ planner → 標準ライブラリのみ
 
 ## 設定とCLI
 
-設定JSONのkey、default、validationは既存形式を維持する。主要項目は`vaultPath`、`statePath`、R2接続情報、`password`、`mode`、`remotePrefix`、`files`、`ignoreExtra`、`fetchConcurrency`、`requestTimeoutSeconds`、`unicodeCollisionPolicy`、`textMergeBaseMaxBytes`、`recheckRemoteBeforeApply`である。
+設定JSONのkey、default、validationは既存形式を維持する。主要項目は`vaultPath`、`statePath`、R2接続情報、`password`、`mode`、`remotePrefix`、`files`、`ignoreExtra`、`fetchConcurrency`、`applyConcurrency`、`requestTimeoutSeconds`、`unicodeCollisionPolicy`、`textMergeBaseMaxBytes`、`recheckRemoteBeforeApply`である。
 
 `mode`は必須とし、`full`または`probe`を指定する。相対`statePath`は設定JSONのdirectoryだけを基準とする。
 
@@ -58,7 +58,7 @@ CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`とす
 
 標準ライブラリでscrypt、AES-EME filename encryption、XSalsa20-Poly1305 content encryptionを実装する。AES key schedule、S-box、GF table、filename変換はbounded cacheで再利用する。
 
-R2 accessはAWS SigV4で署名し、GET、PUT、DELETE、ListObjectsV2 paginationを提供する。request timeoutは`requestTimeoutSeconds`、read-only取得並列数は`fetchConcurrency`を使う。Vault書込みとR2 mutationは逐次実行する。
+R2 accessはAWS SigV4で署名し、GET、PUT、DELETE、ListObjectsV2 paginationを提供する。request timeoutは`requestTimeoutSeconds`、read-only取得並列数は`fetchConcurrency`を使う。PUSHのPUT並列数は`applyConcurrency`を使い、Vault書込み、MERGE、DELETEは逐次実行する。
 
 ## パス、Unicode、除外
 
@@ -89,7 +89,8 @@ entryは共有fieldに加え、3-way merge用の`baseContentBase64`を持てる�
 3. candidateだけを並列GET・復号し、内容一致、mtime、3-way mergeで最終actionへ解決
 4. local全対象を内容hashで再検証
 5. remote snapshotを再listして計画時identityと比較
-6. mutationを1件ずつ適用し、再開境界ごとにcheckpoint
+6. PUSHを設定並列数で適用して成功分を一括checkpoint
+7. その他のmutationを1件ずつ適用し、再開境界ごとにcheckpoint
 
 NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoint、適用進捗から除外する。SEEDは外部mutationを伴わないためmemory上でまとめ、次のcheckpointまたはloop終了時に保存する。
 
@@ -98,10 +99,11 @@ NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoi
 - dry-runは取得・検証まで行えるが、Vault、R2、checkpointを変更しない。
 - 全candidateの取得・復号・競合判定を完了してから最初のmutationを行う。
 - PULLは同一directoryのtemp fileをfsyncし、mtimeを設定してから`os.replace`する。
-- PUSH/DELETE_REMOTEはR2成功後、PULL/DELETE_LOCALはlocal成功後にcheckpointする。
+- PUSHはbatch内の全future確定後、成功分を1回のcheckpointへ保存する。一部失敗時も成功分を保存し、以降の非PUSH操作は行わない。強制終了でbatch checkpoint前に停止した場合は、次回実行でremoteとの差分を再評価する。
+- DELETE_REMOTEはR2成功後、PULL/DELETE_LOCALはlocal成功後にcheckpointする。
 - MERGEはlocalをatomic replaceしてからR2へPUTする。PUT失敗時はcheckpointせず、次回に変更済みlocalを再計画する。
 - delete actionは計画されても`--allow-delete`なしではskipし、対象を変更しない。
-- 適用途中の失敗では、それ以前に成功した操作のcheckpointを保持して再開可能にする。
+- 適用途中の失敗では、それ以前に成功した操作、または成功したPUSH batchのcheckpointを保持して再開可能にする。
 - `recheckRemoteBeforeApply=false`の明示時だけremote snapshot再確認を省略し、stderr警告と結果flagへ記録する。
 
 ## 同時実行と中断
@@ -109,6 +111,8 @@ NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoi
 正規化したVault絶対pathのSHA-256から一時領域のlock file名を作り、非待機OS lockを取得する。Windowsは`msvcrt.locking`、Unix/iOSは`fcntl.flock`を使う。lock競合時はR2 client生成前に終了し、`--check-ignore`はlock対象外とする。
 
 並列取得中のCtrl+Cでは未開始futureをcancelし、worker終了待ちをせずCLIを終了する。この段階はmutation前なのでVault、R2、checkpointは変更済みにならない。
+
+並列PUSH中のCtrl+Cでは未開始futureをcancelするが、開始済みPUTはprocess lockを保持したまま終了を待つ。batch結果のcheckpoint前に終了した場合はstateがremoteより古い可能性があるため、次回のfull scanで内容とremote identityを再評価する。
 
 ## 進捗と計測
 

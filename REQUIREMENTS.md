@@ -58,9 +58,9 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - T1はショートカット起動からVaultへの直接ファイル置換完了までとし、中央値5秒以内を目標にする
 - 同一条件を10回測定し、95パーセンタイル10秒以内を目安にする
 - Obsidianが外部変更を認識するまでのT2は別計測とする
-- iOS/Python版のR2取得・内容確認は`fetchConcurrency`で1〜16並列を指定でき、既定値は2とする。Vault書き込みとR2変更は1並列を維持する
+- iOS/Python版のR2取得・内容確認は`fetchConcurrency`、R2へのPUSHは`applyConcurrency`でそれぞれ1〜16並列を指定でき、既定値は順に2、1とする。Vault書き込み、MERGE、削除は1並列を維持する
 - iOS/Python版のR2リクエストtimeoutは`requestTimeoutSeconds`で1〜300秒を指定でき、既定値は30秒とする
-- PC版の並列数8は変更しない
+- Node.js版の固定並列数8は変更しない
 - 定常時の全件NOOP判定ではファイル内容を再読込せず、走査で取得したmtime/sizeを前回stateと比較する
 - `timingsMs`は全体の`scan`に加えて、`scanLocal`、`listRemote`、`decodeRemote`、走査漏れした既存ローカルパスを再解決する`reconcileLocal`を個別に返す
 - NOOPパスは実際にファイルへアクセスする分岐まで絶対パス解決を遅延し、定常時の差分判定でファイルシステムへ再アクセスしない
@@ -89,24 +89,25 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Python実装はCLI/config、暗号、local filesystem、checkpoint、R2、pureな同期計画、mutation適用の責務へ分割し、循環importと無秩序な共通moduleを作らない
 - CLI entrypointは引数解析とorchestrationに限定し、同期判定とI/O実装を各責務moduleへ置く
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
-- R2取得・内容確認は`fetchConcurrency`の指定数、Vault書き込みとR2変更は1並列で実行する。全候補の取得・復号・競合判定を終えてから最初の変更を行う
+- R2取得・内容確認は`fetchConcurrency`の指定数、R2へのPUSHは`applyConcurrency`の指定数で実行する。Vault書き込み、MERGE、削除は1並列とする。全候補の取得・復号・競合判定を終えてから最初の変更を行う
 - Python版の`ignoreExtra`はVaultルートからの相対パス（区切りは`/`）へ適用するGitignore風globの配列とする。`foo/bar/**`はVault直下の対象ディレクトリと配下、`**/.env`はVault全階層の`.env`、`.git`のようにスラッシュを含まないパターンは全階層の同名要素に一致する。ローカル走査と復号後のR2一覧へ同じ判定を適用する。Node版の`IGNORE_EXTRA`は既存のconfigディレクトリ基準を維持する
 - PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
 - 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
 - stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う
 - リモート一覧から消えたオブジェクトは、削除許可がない場合は保持し、許可時だけローカル削除またはPUSHで処理する
 - PUSH・PULL・merge対象のローカル内容を変更開始前に再検査し、R2一覧も再取得して当初のremote snapshotと比較する。競合が1件でもあれば変更を開始しない
-- 成功した操作ごとに、設定ファイル基準で指定した状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする。Vault内にある設定ファイル、状態ファイル、状態更新用一時ファイルは、Vault走査・R2一覧から強制除外して同期しない
+- 成功したPULL・MERGE・削除ごと、およびPUSH batch完了時に、設定ファイル基準で指定した状態ファイルを一時ファイル経由で更新し、次回再開できる checkpoint とする。Vault内にある設定ファイル、状態ファイル、状態更新用一時ファイルは、Vault走査・R2一覧から強制除外して同期しない
 - Python版はbasenameが`state.json`のファイルも設定に関係なくVault全階層で強制除外し、ローカル・R2・旧stateのいずれからも同期計画へ入れない
 - Python版は`--check-ignore [PATH ...]`で、R2へ接続せずに設定済み除外ルールの判定結果を確認できる。PATH省略時はVaultをローカル走査し、除外対象を`IGNORE`、除外されないローカルファイルを`INCLUDE`として両方とも標準出力へ表示する。通常表示では、ディレクトリ全体の除外だけを配下全体としてまとめ、`**/.env`、個別ファイル指定、`state.json`などのファイル除外は各ファイルパスを表示する。`INCLUDE`は除外対象を含まないサブツリーを可能な限りVaultルート側のフォルダ単位にまとめ、除外対象と混在するフォルダだけ下位へ展開する。件数と集約注記は英語で表示する。`--verbose`指定時は除外ディレクトリ配下も走査して全パスを表示する。`INCLUDE`はR2未照合の同期対象候補であり、PUSH確定を意味しない。PATH指定時は各Vault相対パスを個別判定し、全件除外なら終了コード0、同期対象が1件でもあれば1を返す。この診断ではVault・R2・stateを変更しない
 - `--apply` がない実行は取得・検証だけを行い、Vaultと状態を変更しない。結果はShortcutsが受け取れるJSONで標準出力へ出す
 - Node版と同じく、Vault・実行モード、local/remote/state件数、action別の計画と対象パス、取得・検証／適用件数、最終集計、競合・エラーを実行中に表示する。action別の対象パスは各20件まで表示し、超過分は省略件数にまとめる。Shortcuts向けJSONを壊さないよう、人向け進捗は標準エラーへ逐次出力し、最終JSONだけを標準出力へ整形して出す。整形JSONは複数行だが、標準のJSONパーサーでそのまま受け取れる
 - 最終JSONの`ignoredRemoteObjects`は、除外ルールへ正常一致した`reason: "ignored"`の個別オブジェクトを省略し、総数と省略数を別フィールドで返す。パス復号不能など調査可能な詳細だけを最大20件保持する。人向け最終結果には除外remote objectの総数を1行で表示する
 - `NOOP`は変更なし件数として表示するだけで、適用計画・適用前再検証・checkpoint更新・適用進捗には含めない。全件`NOOP`の実行結果は`planned=0`かつ`applied=0`とする
-- `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSH・PULL・削除・mergeは成功ごとのcheckpointを維持する
+- `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSHは並列batchの成功分をまとめて1回保存し、一部失敗時も成功分を保存してから以降の非PUSH操作を中止する。PULL・削除・mergeは成功ごとのcheckpointを維持する
 - `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する
 - `recheckRemoteBeforeApply`は真偽値とし、既定値は`true`とする。明示的に`false`を指定した場合だけ適用直前のR2再一覧を省略し、警告と結果JSONのフラグで安全確認を省略したことを示す
 - Python版の並列取得中にCtrl+Cを受けた場合は、未開始タスクを取り消してworker待機をせず終了する。取得・検証段階ではVault、R2、stateを変更しない
+- Python版の並列PUSH中にCtrl+Cを受けた場合は未開始PUTを取り消し、開始済みPUTの終了を待ってから終了コード130で停止する。batch checkpoint前に停止した成功PUTは次回実行で再評価する
 - Python版の同期実行は、正規化したVaultパス単位の非待機OSロックをR2接続前に取得し、処理終了まで保持する。同一端末・同一利用者から同じVaultへの別実行が進行中なら、待機せずエラー結果と終了コード1を返し、Vault、R2、stateを変更しない。ロックは正常終了、例外、Ctrl+C、プロセス終了時に解放され、ロック用ファイルはVault外の一時領域へ置く。読み取り専用の`--check-ignore`はロック対象外とする
 - Node版および別端末の同期処理はPython版のOSロックへ参加しないため、端末間の排他は保証しない。Python版は既存の適用前R2 snapshot再確認により、計画後から適用前までに別クライアントが行ったremote変更を競合として停止する
 - Python版はVault走査名、R2復号パス、stateキー、除外対象パスをUnicode NFCのVault相対パスへ統一する。`unicodeCollisionPolicy`は`error`または`prefer-nfc`とし、既定値は`error`とする。`error`ではNFC正規化後に複数のローカル名、remote object、またはstateキーが同一になる場合に停止する。`prefer-nfc`では一意なNFC表記を同期対象として選び、NFDなどのaliasは削除せず同期対象外にする。一意なNFC表記が存在しない衝突は同設定でも停止する

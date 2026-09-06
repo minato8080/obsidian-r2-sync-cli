@@ -106,6 +106,7 @@ class CliTests(unittest.TestCase):
                     "encryption": "plain",
                     "mode": "full",
                     "fetchConcurrency": 1,
+                    "applyConcurrency": 4,
                     "requestTimeoutSeconds": 7.5,
                     "textMergeBaseMaxBytes": 4,
                     "recheckRemoteBeforeApply": False,
@@ -131,13 +132,17 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(payload["ok"])
                 self.assertFalse(payload["remoteSnapshotRecheckEnabled"])
                 self.assertEqual(payload["fetchConcurrency"], 1)
+                self.assertEqual(payload["applyConcurrency"], 4)
                 client_type.assert_called_once_with(
                     "https://<account-id>.r2.cloudflarestorage.com", "<bucket-name>", "key", "secret",
                     timeout=7.5,
                 )
                 self.assertIn("vault:", stderr.getvalue())
                 self.assertIn("mode: DRY-RUN", stderr.getvalue())
-                self.assertIn("fetch concurrency: 1 / request timeout: 7.5秒", stderr.getvalue())
+                self.assertIn(
+                    "fetch concurrency: 1 / apply concurrency: 4 / request timeout: 7.5秒",
+                    stderr.getvalue(),
+                )
                 self.assertIn("dry-runのため実際の変更は行っていません", stderr.getvalue())
                 self.assertIn("=== 実行結果 ===", stderr.getvalue())
 
@@ -328,6 +333,10 @@ class CliTests(unittest.TestCase):
                     ("fetchConcurrency", 17),
                     ("fetchConcurrency", True),
                     ("fetchConcurrency", 1.5),
+                    ("applyConcurrency", 0),
+                    ("applyConcurrency", 17),
+                    ("applyConcurrency", True),
+                    ("applyConcurrency", 1.5),
                     ("requestTimeoutSeconds", 0),
                     ("requestTimeoutSeconds", 301),
                     ("requestTimeoutSeconds", True),
@@ -386,6 +395,22 @@ class CliTests(unittest.TestCase):
             for future in futures:
                 future.cancel.assert_called_once_with()
             pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+
+    def test_parallel_mutation_interrupt_waits_for_active_workers(self):
+            pool = mock.Mock()
+            futures = [mock.Mock(), mock.Mock()]
+            pool.submit.side_effect = futures
+
+            with mock.patch.object(remote_module.concurrent.futures, "ThreadPoolExecutor", return_value=pool):
+                with mock.patch.object(remote_module.concurrent.futures, "as_completed", side_effect=KeyboardInterrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        remote_module._run_parallel(
+                            ["one", "two"], lambda value: value, 2, wait_on_interrupt=True
+                        )
+
+            for future in futures:
+                future.cancel.assert_called_once_with()
+            pool.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
     def test_full_sync_uses_configured_fetch_concurrency(self):
             with tempfile.TemporaryDirectory() as root:

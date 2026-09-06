@@ -10,6 +10,7 @@
   "unicodeCollisionPolicy": "error",
   "remotePrefix": "",
   "fetchConcurrency": 2,
+  "applyConcurrency": 1,
   "requestTimeoutSeconds": 30,
   "textMergeBaseMaxBytes": 1048576,
   "recheckRemoteBeforeApply": true,

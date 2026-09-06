@@ -61,6 +61,11 @@ def _report_fetch_progress(progress, done: int, total: int) -> None:
         _emit_progress(progress, f"  取得・検証中: {done}/{total}")
 
 
+def _report_push_progress(progress, done: int, total: int) -> None:
+    if total <= 10 or done % 50 == 0 or done == total:
+        _emit_progress(progress, f"  PUSH中: {done}/{total}")
+
+
 def execute_probe(
     vault_path: str | Path,
     state_path: str | Path,
@@ -179,6 +184,7 @@ def execute_full_sync(
     text_merge_base_max_bytes: int | None = None,
     recheck_remote_before_apply: bool = True,
     fetch_concurrency: int = 2,
+    apply_concurrency: int = 1,
     unicode_collision_policy: str = "error",
     progress=None,
 ) -> dict:
@@ -355,6 +361,7 @@ def execute_full_sync(
         "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
         "remoteSnapshotRechecked": False,
         "fetchConcurrency": fetch_concurrency,
+        "applyConcurrency": apply_concurrency,
         "mergeBasesPruned": 0, "mergeBasesPendingPrune": merge_bases_to_prune,
         "plannedByType": counts, "appliedByType": {}, "skippedByType": {},
         "timingsMs": {
@@ -473,7 +480,7 @@ def execute_full_sync(
         return result
 
     apply_started = time.perf_counter()
-    _emit_progress(progress, "変更を適用しています(並列1件)...")
+    _emit_progress(progress, "変更を適用しています...")
 
     def checkpoint(path_name: str, etag: str | None, data: bytes, persist: bool = True) -> None:
         nonlocal state_dirty
@@ -488,28 +495,103 @@ def execute_full_sync(
     def bump(mapping: dict, action_type: str) -> None:
         mapping[action_type] = mapping.get(action_type, 0) + 1
 
-    for index, action in enumerate(applicable_actions, start=1):
+    seed_actions = [action for action in applicable_actions if action["type"] == "SEED"]
+    push_actions = [action for action in applicable_actions if action["type"] == "PUSH"]
+    sequential_actions = [
+        action for action in applicable_actions if action["type"] not in ("SEED", "PUSH")
+    ]
+
+    for action in seed_actions:
+        checkpoint(
+            action["path"], action["remote"].get("etag"), action["localBytes"], persist=False
+        )
+        bump(result["appliedByType"], "SEED")
+
+    prepared_pushes = []
+    if push:
+        for action in push_actions:
+            try:
+                prepared_pushes.append({
+                    "action": action,
+                    "key": (
+                        action["remote"]["key"] if action.get("remote")
+                        else _remote_key(decoder, remote_prefix, action["path"])
+                    ),
+                    "data": decoder.encrypt_content(action["localBytes"]),
+                    "contentHash": hashlib.sha256(action["localBytes"]).digest(),
+                })
+            except Exception as error:
+                result["ok"] = False
+                result["errors"].append({"path": action["path"], "error": str(error)})
+    else:
+        for _ in push_actions:
+            bump(result["skippedByType"], "PUSH")
+
+    if prepared_pushes and not result["errors"]:
+        push_workers = min(apply_concurrency, len(prepared_pushes))
+        _emit_progress(progress, f"R2へPUSHしています(並列{push_workers}件)...")
+
+        def apply_push(spec: dict):
+            action = spec["action"]
+            return put(spec["key"], spec["data"], action["localMtimeMs"])
+
+        remote_started = time.perf_counter()
+        try:
+            completed_pushes = _run_parallel(
+                prepared_pushes, apply_push, apply_concurrency,
+                lambda done, total: _report_push_progress(progress, done, total),
+                wait_on_interrupt=True,
+            )
+        finally:
+            apply_remote_seconds += time.perf_counter() - remote_started
+        for spec, future in completed_pushes:
+            action = spec["action"]
+            try:
+                etag = future.result()
+            except Exception as error:
+                result["ok"] = False
+                result["errors"].append({"path": action["path"], "error": str(error)})
+                continue
+            target = _vault_path(vault, action["path"])
+            source_unchanged = (
+                target.is_file()
+                and hashlib.sha256(target.read_bytes()).digest() == spec["contentHash"]
+            )
+            result["applied"] += 1
+            bump(result["appliedByType"], "PUSH")
+            if not source_unchanged:
+                result["ok"] = False
+                result["conflicts"].append({
+                    "path": action["path"], "reason": "local file changed during push"
+                })
+                continue
+            checkpoint(action["path"], etag, action["localBytes"], persist=False)
+
+    processed_count = len(seed_actions) + len(push_actions)
+    if processed_count:
+        _emit_progress(progress, f"  適用中: {processed_count}/{len(applicable_actions)}")
+
+    should_checkpoint_batch = state_dirty and (
+        bool(prepared_pushes) or bool(result["errors"]) or not sequential_actions
+    )
+    if should_checkpoint_batch:
+        try:
+            persist_entries()
+        except Exception as error:
+            result["ok"] = False
+            result["errors"].append({"path": "<state>", "error": str(error)})
+    if result["errors"] or result["conflicts"]:
+        finish_apply_timing(apply_started)
+        result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
+        return result
+
+    for action in sequential_actions:
+        processed_count += 1
         path_name = action["path"]
         target = _vault_path(vault, path_name)
         try:
             action_type = action["type"]
-            if action_type == "SEED":
-                checkpoint(path_name, action["remote"].get("etag"), action["localBytes"], persist=False)
-                bump(result["appliedByType"], action_type)
-            elif action_type == "PUSH":
-                if not push:
-                    bump(result["skippedByType"], action_type)
-                    continue
-                etag = timed_remote(
-                    put,
-                    action["remote"]["key"] if action.get("remote") else _remote_key(decoder, remote_prefix, path_name),
-                    decoder.encrypt_content(action["localBytes"]),
-                    action["localMtimeMs"],
-                )
-                checkpoint(path_name, etag, action["localBytes"])
-                result["applied"] += 1
-                bump(result["appliedByType"], action_type)
-            elif action_type == "PULL":
+            if action_type == "PULL":
                 atomic_replace(target, action["data"], action["mtimeMs"])
                 checkpoint(path_name, action["etag"], action["data"])
                 result["applied"] += 1
@@ -550,10 +632,10 @@ def execute_full_sync(
         except Exception as error:
             result["ok"] = False
             result["errors"].append({"path": path_name, "error": str(error)})
-            _emit_progress(progress, f"  適用中: {index}/{len(applicable_actions)}")
+            _emit_progress(progress, f"  適用中: {processed_count}/{len(applicable_actions)}")
             break
-        if index % 50 == 0 or index == len(applicable_actions):
-            _emit_progress(progress, f"  適用中: {index}/{len(applicable_actions)}")
+        if processed_count % 50 == 0 or processed_count == len(applicable_actions):
+            _emit_progress(progress, f"  適用中: {processed_count}/{len(applicable_actions)}")
     if state_dirty and not result["errors"]:
         try:
             persist_entries()

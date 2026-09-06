@@ -134,9 +134,11 @@ stateが添付ファイルのmerge baseで大きくなる場合は、設定へ`"
 
 適用直前のR2再一覧は既定で有効である。同期中に他クライアントがR2を変更しないことを手動運用で保証できる場合に限り、`"recheckRemoteBeforeApply": false`で省略できる。省略時は競合更新を直前検出できないため、通常は`true`のまま使う。
 
-Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、1リクエストのtimeoutは`"requestTimeoutSeconds": 30`（1〜300秒）で設定できる。PC上で通信が止まる場合は、まず`fetchConcurrency`を1、`requestTimeoutSeconds`を10程度に下げて切り分ける。`python`と`python3`のコマンド名の違い自体は原因ではなく、Python 3.9以上であれば同じ実装を実行する。
+Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、R2へのPUSH並列数は`"applyConcurrency": 1`（1〜16）、1リクエストのtimeoutは`"requestTimeoutSeconds": 30`（1〜300秒）で設定できる。iPhoneでは`applyConcurrency: 1`を維持し、PCではまず4を推奨する。PUSHだけが並列化され、Vault書き込み、MERGE、削除は逐次実行される。並列PUSHの一部が失敗した場合は成功分だけcheckpointし、残る操作は次回再評価する。PC上で通信が止まる場合は、まず両方の並列数を1、`requestTimeoutSeconds`を10程度に下げて切り分ける。`python`と`python3`のコマンド名の違い自体は原因ではなく、Python 3.9以上であれば同じ実装を実行する。
 
 取得・検証中のCtrl+Cは未開始リクエストを取り消し、workerの終了待ちをせずCLIを終了する。この段階ではVault、R2、stateをまだ変更していない。これらの設定と中断処理はPython版だけに適用し、Node版は従来どおり固定8並列のままとする。
+
+並列PUSH中のCtrl+Cは未開始PUTを取り消すが、送信開始済みのPUTが終了するまでは待機する。終了後のcheckpoint前に中断した分は、次回実行でR2とローカルの内容を再評価する。
 
 ## 実行のたびに確認すること
 

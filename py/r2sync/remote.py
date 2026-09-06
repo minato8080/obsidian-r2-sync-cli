@@ -1,4 +1,4 @@
-"""R2 transport, remote-object normalization, and parallel reads."""
+"""R2 transport, remote-object normalization, and bounded parallel work."""
 
 from __future__ import annotations
 
@@ -154,13 +154,16 @@ class R2Client:
                 return items
 
 
-def _run_parallel(items: list, worker, concurrency: int, on_progress=None) -> list[tuple[object, concurrent.futures.Future]]:
-    """Run read-only work and return futures in input order.
+def _run_parallel(
+    items: list, worker, concurrency: int, on_progress=None, *, wait_on_interrupt: bool = False,
+) -> list[tuple[object, concurrent.futures.Future]]:
+    """Run work and return futures in input order.
 
     ThreadPoolExecutor's context manager waits for every worker while unwinding.
     That makes Ctrl+C appear ineffective when a network worker is blocked.  On
-    interruption, cancel work that has not started and deliberately skip that
-    wait; the CLI entry point then exits without running Python's thread join.
+    interruption, read-only callers deliberately skip that wait. Mutation
+    callers set ``wait_on_interrupt`` so the process lock is not released while
+    a remote write remains active.
     """
     if not items:
         return []
@@ -190,12 +193,12 @@ def _run_parallel(items: list, worker, concurrency: int, on_progress=None) -> li
     except KeyboardInterrupt as error:
         for future in future_items:
             future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=wait_on_interrupt, cancel_futures=True)
         raise ParallelInterrupted() from error
     except BaseException:
         for future in future_items:
             future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=wait_on_interrupt, cancel_futures=True)
         raise
     else:
         pool.shutdown(wait=True)
