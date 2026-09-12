@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -27,6 +28,17 @@ async function makeRoot(prefix) {
   const vault = path.join(root, "vault");
   await fs.mkdir(vault);
   return { root, vault, state: path.join(root, "state.json") };
+}
+
+function runCli(args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 async function run() {
@@ -96,6 +108,44 @@ async function run() {
       assert.match(entry.stdout, /legacy \.sync-state\.json detected/);
       assert.equal(entry.status, 1);
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+  }
+
+  {
+    const server = createServer((request, response) => {
+      if (request.method === "HEAD") {
+        response.writeHead(200);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/xml" });
+      response.end("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IsTruncated>false</IsTruncated></ListBucketResult>");
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "r2-sync-cli-smoke-"));
+    try {
+      const vault = path.join(root, "vault");
+      await fs.mkdir(vault);
+      const configPath = path.join(root, "config.json");
+      await fs.writeFile(configPath, JSON.stringify({
+        vaultPath: vault,
+        statePath: "state.json",
+        endpoint: `http://127.0.0.1:${server.address().port}`,
+        bucket: "bucket",
+        accessKeyId: "key",
+        secretAccessKey: "secret",
+        password: "",
+        encryption: "plain",
+        mode: "full",
+        remotePrefix: "",
+      }));
+      const result = await runCli([path.resolve("src/index.js"), "--config", configPath], { cwd: root });
+      assert.equal(result.status, 0, result.stderr + result.stdout);
+      assert.match(result.stdout, /"ok": true/);
+      assert.match(result.stderr, /DRY-RUN/);
+    } finally {
+      server.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
   }
   console.log("full sync safety tests passed");
 }

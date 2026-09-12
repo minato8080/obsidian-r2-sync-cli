@@ -95,7 +95,7 @@ export async function classifyLocalPaths(vaultPath, ignoreMatcher, verbose = fal
   const ignored = [], included = [];
   async function walk(directory, relDir, inherited = false) {
     const entries = await fs.readdir(directory, { withFileTypes: true });
-    for (const [entry, name] of selectNfc(entries, relDir, "prefer-nfc", { ignored: 0 })) {
+    for (const [entry, name] of selectNfc(entries, relDir, "prefer-nfc", { ignored: 0 }).sort((left, right) => left[1] < right[1] ? -1 : left[1] > right[1] ? 1 : 0)) {
       const relPath = relDir ? `${relDir}/${name}` : name;
       const absPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
@@ -105,5 +105,36 @@ export async function classifyLocalPaths(vaultPath, ignoreMatcher, verbose = fal
       } else if (entry.isFile()) (inherited || ignoreMatcher.isIgnoredFile(relPath) ? ignored : included).push(relPath);
     }
   }
-  await fs.mkdir(vaultPath, { recursive: true }); await walk(vaultPath, ""); return { ignored, included };
+  await fs.mkdir(vaultPath, { recursive: true }); await walk(vaultPath, "");
+  ignored.sort(); included.sort();
+  return { ignored, included };
+}
+
+export function summarizeIncludedPaths(includedPaths, ignoredPaths) {
+  const directFiles = new Map(), childDirs = new Map(), includedCounts = new Map(), blockedDirs = new Set();
+  const addToList = (map, key, value) => map.set(key, [...(map.get(key) ?? []), value]);
+  const addToSet = (map, key, value) => map.set(key, new Set([...(map.get(key) ?? []), value]));
+  for (const relPath of includedPaths) {
+    const parts = relPath.split("/"), parent = parts.slice(0, -1).join("/");
+    addToList(directFiles, parent, relPath);
+    for (let index = 1; index < parts.length; index += 1) {
+      const directory = parts.slice(0, index).join("/"), directoryParent = parts.slice(0, index - 1).join("/");
+      addToSet(childDirs, directoryParent, directory);
+      includedCounts.set(directory, (includedCounts.get(directory) ?? 0) + 1);
+    }
+  }
+  for (const relPath of ignoredPaths) {
+    const parts = relPath.replace(/\/$/, "").split("/");
+    for (let index = 1; index <= parts.length; index += 1) blockedDirs.add(parts.slice(0, index).join("/"));
+  }
+  const summary = [];
+  function emit(directory) {
+    for (const relPath of directFiles.get(directory) ?? []) summary.push([relPath, null]);
+    for (const child of [...(childDirs.get(directory) ?? [])].sort()) {
+      if (!blockedDirs.has(child)) summary.push([`${child}/`, includedCounts.get(child)]);
+      else emit(child);
+    }
+  }
+  emit("");
+  return summary.sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
 }

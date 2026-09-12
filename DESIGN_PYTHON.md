@@ -147,5 +147,6 @@ python -m unittest discover -s tests/python -t .
 
 ## 関連
 
+- [SETUP_PYTHON.md](SETUP_PYTHON.md)
 - [DESIGN.md](DESIGN.md)
 - [REQUIREMENTS.md](REQUIREMENTS.md)

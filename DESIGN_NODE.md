@@ -93,5 +93,6 @@ node src/index.js --config config.json --apply --allow-delete
 
 ## 関連
 
+- [SETUP_NODE.md](SETUP_NODE.md)
 - [DESIGN.md](DESIGN.md)
 - [REQUIREMENTS.md](REQUIREMENTS.md)

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -64,6 +64,45 @@ try {
   assert.equal(`${smoke.stdout}${smoke.stderr}`.includes("path is not defined"), false, "Node CLI referenced an unimported path binding");
 } finally {
   rmSync(smokeRoot, { recursive: true, force: true });
+}
+
+const classifyRoot = mkdtempSync(path.join(os.tmpdir(), "r2-sync-check-ignore-"));
+try {
+  const indexPath = fileURLToPath(new URL("../../src/index.js", import.meta.url));
+  const vault = path.join(classifyRoot, "vault");
+  mkdirSync(path.join(vault, "ignored"), { recursive: true });
+  mkdirSync(path.join(vault, ".agents"), { recursive: true });
+  mkdirSync(path.join(vault, "mixed", "pure", "deep"), { recursive: true });
+  mkdirSync(path.join(vault, "mixed"), { recursive: true });
+  for (const relative of [
+    "ignored/file.txt", ".agents/one.md", ".agents/two.md", "keep.txt",
+    "mixed/keep.txt", "mixed/.env", "mixed/pure/a.txt", "mixed/pure/deep/b.txt",
+    ".env", "state.json",
+  ]) writeFileSync(path.join(vault, ...relative.split("/")), relative);
+  const configPath = path.join(classifyRoot, "config.json");
+  writeFileSync(configPath, JSON.stringify({
+    vaultPath: vault, statePath: "state.json", endpoint: "http://127.0.0.1:1",
+    bucket: "placeholder", accessKeyId: "placeholder", secretAccessKey: "placeholder",
+    password: "placeholder", encryption: "plain", mode: "full",
+    ignoreExtra: ["ignored/**", "**/.env"],
+  }));
+  const listed = spawnSync(process.execPath, [indexPath, "--config", configPath, "--check-ignore"], { cwd: classifyRoot, encoding: "utf8", timeout: 10_000 });
+  const verbose = spawnSync(process.execPath, [indexPath, "--config", configPath, "--verbose", "--check-ignore"], { cwd: classifyRoot, encoding: "utf8", timeout: 10_000 });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(verbose.status, 0, verbose.stderr);
+  assert.match(listed.stdout, /\[IGNORE\] 4 entries/);
+  assert.match(listed.stdout, /  ignored\/ \(all files\)/);
+  assert.match(listed.stdout, /\[INCLUDE\] 6 files/);
+  assert.match(listed.stdout, /  \.agents\/ \(2 files\)/);
+  assert.match(listed.stdout, /  mixed\/pure\/ \(2 files\)/);
+  assert.doesNotMatch(listed.stdout, /  \.agents\/one\.md/);
+  assert.match(verbose.stdout, /\[IGNORE\] 5 entries/);
+  assert.match(verbose.stdout, /  ignored\/file\.txt/);
+  assert.match(verbose.stdout, /\[INCLUDE\] 6 files/);
+  assert.match(verbose.stdout, /  \.agents\/one\.md/);
+  assert.match(verbose.stdout, /  mixed\/pure\/deep\/b\.txt/);
+} finally {
+  rmSync(classifyRoot, { recursive: true, force: true });
 }
 
 console.log("ignore tests passed");

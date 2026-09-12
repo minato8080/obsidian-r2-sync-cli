@@ -38,7 +38,7 @@ npm run sync:apply       # 削除以外を実際に適用
 npm run sync:full        # 削除も含めて完全に適用
 ```
 
-詳しい手順は [`SETUP.md`](./SETUP.md)、共通設計は [`DESIGN.md`](./DESIGN.md)、実装別の詳細は [`DESIGN_NODE.md`](./DESIGN_NODE.md) と [`DESIGN_PYTHON.md`](./DESIGN_PYTHON.md) を参照してください。
+詳しい手順は [`SETUP.md`](./SETUP.md)、[`SETUP_NODE.md`](./SETUP_NODE.md)、[`SETUP_PYTHON.md`](./SETUP_PYTHON.md)、共通設計は [`DESIGN.md`](./DESIGN.md)、実装別の詳細は [`DESIGN_NODE.md`](./DESIGN_NODE.md) と [`DESIGN_PYTHON.md`](./DESIGN_PYTHON.md) を参照してください。
 
 性能測定の条件・対象断面・結果は [`PERFORMANCE.md`](./PERFORMANCE.md) に記録しています。
 

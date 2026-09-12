@@ -36,3 +36,5 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期す
 
 - [REQUIREMENTS.md](REQUIREMENTS.md)
 - [SETUP.md](SETUP.md)
+- [SETUP_NODE.md](SETUP_NODE.md)
+- [SETUP_PYTHON.md](SETUP_PYTHON.md)
