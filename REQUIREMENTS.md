@@ -11,17 +11,26 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Node.js版ソースは`src/`、Python版ソースは`py/`、テストは`tests/node/`と`tests/python/`へ実装別に配置する
 - 利用者環境のVault内にある生成済みバンドル配置先は、要件・設計・ソースの管理場所にしない
 - 本リポジトリの実装変更後、必要な場合だけ `npm run build` でバンドルを生成し、利用者が指定する配布先へ配置する
-- 実値の `.env`、アクセスキー、パスワード、個人用パスはコミット・バンドル・Vaultへ含めない
+- 実値の `config.json`、アクセスキー、パスワード、個人用パスはコミット・バンドル・Vaultへ含めない
 
 ## デスクトップ版の要件
 
 - Node.jsからR2のS3互換APIへ直接アクセスする
 - Remotely Saveのrclone-base64暗号化形式と互換にする
 - VaultとR2を全走査し、独自の3-way比較でPUSH／PULL／NOOP／削除を判定する
-- `.sync-state.json`で本PJ自身の前回状態を管理する
+- `config.json`の`statePath`で本PJ自身の前回状態を管理する
+- 設定移行時は、旧Node版の`.sync-state.json`を自動で新stateへ採用しない。新`statePath`が存在せず旧stateだけが存在する場合は、R2接続・Vault/R2変更を行わず、明示的な移行を要求する
 - デフォルトはdry-runとし、実行系・削除系には明示フラグを要求する
 - `NOOP`は変更なし件数として表示するだけで、適用処理・checkpoint更新・適用進捗には含めない
 - `npm test`で偽リモートと一時Vaultを使った同期判定・適用を検証できる
+
+### Node.js版の安全性
+
+- Vault内のsymlink、junction、reparse pointを経由してVault外の実体を読み書き・削除してはならない。同期対象として採用するローカルパスと、適用直前に解決するパスの両方でVault実体配下を確認する
+- R2一覧の復号後に同じNFC相対パスへ複数objectが対応した場合、そのパスは競合として計画・適用から除外する。remote一覧自体を検証できない全体エラーでは、いかなるmutationも開始しない
+- `--apply`開始前に、PUSH、PULL、MERGE、DELETE、FORGETの全対象をlocal snapshot（内容hashまたは不在）で再確認する。mtime/sizeだけでは再確認完了とみなさない
+- Probeは既存ファイルを無条件に上書きせず、前回stateまたはdry-runなしの既存targetを競合として停止する。設定ファイル、checkpoint、checkpoint一時ファイルはProbe対象からも除外する
+- PUSH batchの一部失敗時は成功分をcheckpointした後、後続のPULL、MERGE、削除、FORGETを実行しない
 
 ## iOS版の要件
 
@@ -90,7 +99,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - CLI entrypointは引数解析とorchestrationに限定し、同期判定とI/O実装を各責務moduleへ置く
 - `mode: "full"` ではVaultを再帰走査し、R2をListObjectsV2で全列挙して、現行PC版のstate形式を使った同期計画を作る
 - R2取得・内容確認は`fetchConcurrency`の指定数、R2へのPUSHは`applyConcurrency`の指定数で実行する。Vault書き込み、MERGE、削除は1並列とする。全候補の取得・復号・競合判定を終えてから最初の変更を行う
-- Python版の`ignoreExtra`はVaultルートからの相対パス（区切りは`/`）へ適用するGitignore風globの配列とする。`foo/bar/**`はVault直下の対象ディレクトリと配下、`**/.env`はVault全階層の`.env`、`.git`のようにスラッシュを含まないパターンは全階層の同名要素に一致する。ローカル走査と復号後のR2一覧へ同じ判定を適用する。Node版の`IGNORE_EXTRA`は既存のconfigディレクトリ基準を維持する
+- `config.json`の`ignoreExtra`はVaultルートからの相対パス（区切りは`/`）へ適用するGitignore風globの配列とする。`foo/bar/**`はVault直下の対象ディレクトリと配下、`**/.env`はVault全階層の`.env`、`.git`のようにスラッシュを含まないパターンは全階層の同名要素に一致する。ローカル走査と復号後のR2一覧へ同じ判定を適用する
 - PUSHはrclone-base64のファイル名・内容暗号化とmtime metadata付きPUTを行う。削除は`--allow-delete`指定時だけR2またはVaultへ反映する
 - 初回にローカルとリモートの両方にあるファイルは内容を比較し、一致時だけ`SEED`としてstateへ記録する。不一致はmtime判定または自動mergeに従う
 - stateがあるファイルはlocalMtimeMs、localSize、localContentHash、baseContentBase64とremoteETagで変更を判定する。PULL対象のlocal変更とremote変更が同時ならmergeまたはmtime判定を行う
@@ -113,7 +122,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - Python版はVault走査名、R2復号パス、stateキー、除外対象パスをUnicode NFCのVault相対パスへ統一する。`unicodeCollisionPolicy`は`error`または`prefer-nfc`とし、既定値は`error`とする。`error`ではNFC正規化後に複数のローカル名、remote object、またはstateキーが同一になる場合に停止する。`prefer-nfc`では一意なNFC表記を同期対象として選び、NFDなどのaliasは削除せず同期対象外にする。一意なNFC表記が存在しない衝突は同設定でも停止する
 - `prefer-nfc`で同期対象外にしたUnicode aliasの総数を`unicodeAliasesIgnored`として進捗と結果JSONへ表示する。明示設定はaliasの削除や内容統合を行わない
 - Python版はR2一覧の復号後、ローカル走査に存在しない同期対象パスをVault上で直接再解決する。Files Providerの遅延列挙やUnicode表現差により既存ファイルを発見した場合はローカル走査結果へ補完し、新規PULLではなく既存ファイルとして内容比較する。補完件数を進捗と結果JSONへ表示する
-- Node版は既存の固定8並列を維持し、`fetchConcurrency`と`requestTimeoutSeconds`の対象外とする
+- Node版は互換性のため固定8並列を維持し、`fetchConcurrency`、`applyConcurrency`、`requestTimeoutSeconds`は設定形式互換のため受理するが実行時には使用しない
 - stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず、そのパスだけをskipして他の非競合パスを適用する
 - `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
 

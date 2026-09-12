@@ -11,7 +11,7 @@
 ```text
 src/
 ├── index.js         # CLI entrypoint
-├── config.js        # .env読込とVaultパス解決
+├── config.js        # config.json読込とパス解決
 ├── crypto.js        # rclone-crypt互換ラッパー
 ├── s3.js            # R2 list/get/put/delete
 ├── ignore.js        # 同期対象外判定
@@ -58,9 +58,9 @@ NOOPは集計だけに含め、適用・checkpoint更新・適用進捗から外
 
 ## 除外規則
 
-`src/ignore.js`は`.git/`、`node_modules/`、`.DS_Store`、`Thumbs.db`を既定除外する。環境固有の除外は`.env`の`IGNORE_EXTRA`で指定する。
+`src/ignore.js`は`.git/`、`node_modules/`、`.DS_Store`、`Thumbs.db`、`state.json`を既定除外する。環境固有の除外は`config.json`の`ignoreExtra`で指定し、Python版と同じくVaultルート基準で評価する。設定ファイル、state、state更新用一時ファイルは自動保護する。
 
-`IGNORE_EXTRA`は設定ディレクトリ基準のgitignore風globである。先頭`/`は基準直下、slashを含むpatternは基準からの相対、slashを含まないpatternは全階層に一致する。`*`と`?`はslashをまたがず、`**`は複数階層をまたぐ。`./path`は`/path`と同じ扱いを維持する。
+`ignoreExtra`はVaultルート基準のgitignore風globである。先頭`/`はVault直下、slashを含むpatternはVaultからの相対、slashを含まないpatternは全階層に一致する。`*`と`?`はslashをまたがず、`**`は複数階層をまたぐ。`./path`は`/path`と同じ扱いを維持する。
 
 暗号化されずに置かれるlegacy metadata objectは、filename復号に失敗するためremote同期対象から除外される。
 
@@ -68,8 +68,14 @@ NOOPは集計だけに含め、適用・checkpoint更新・適用進捗から外
 
 - `--apply`なしではVault、R2、checkpointを変更しない。
 - DELETE_LOCAL/DELETE_REMOTEは`--allow-delete`指定時だけ実行する。
-- 計画をaction別に表示してから適用する。
-- checkpointはNode.js版専用の`.sync-state.json`とする。
+- 計画をaction別に表示してから適用する。`NOOP`は適用対象・checkpoint更新から除外する。
+- checkpointは`config.json`の`statePath`へ保存し、Python版と同じentry形式を使う。merge baseが利用できる場合は`baseContentBase64`も保存する。
+- full modeではPULL候補を先に取得・復号・検証し、ローカル再検査とR2 snapshot再確認を終えてから変更する。PUSHは固定8並列、Vault書込み・MERGE・削除は逐次実行する。
+- `vaultPath`は実体解決後もVault配下であることを確認し、symlink、junction、reparse point経由のVault外アクセスを拒否する。再確認・適用時にも同じ検査を行う。
+- remote filename衝突、無効なremote一覧、またはその他の全体競合は、競合をactionへ変換せず、対象パスまたは全体を適用対象から除外する。
+- apply直前はPUSH/PULL/MERGE/DELETE/FORGET全対象の内容hashまたは不在を再確認する。PUSH batchに失敗があれば成功分だけcheckpointし、後続の非PUSH操作は中止する。
+- Probeは既存targetのlocal snapshot、設定・state・state tempの保護対象判定を行い、保護対象または競合targetを変更しない。
+- 新`statePath`がない状態で旧`.sync-state.json`だけを検出した場合は、旧stateを自動採用せず、移行手順を示してR2接続前に停止する。
 
 ## テスト
 
@@ -78,12 +84,12 @@ NOOPは集計だけに含め、適用・checkpoint更新・適用進捗から外
 ## 実行と配布
 
 ```powershell
-node src/index.js
-node src/index.js --apply
-node src/index.js --apply --allow-delete
+node src/index.js --config config.json
+node src/index.js --config config.json --apply
+node src/index.js --config config.json --apply --allow-delete
 ```
 
-`npm run build`は`src/index.js`と依存を`dist/r2-sync.bundle.cjs`へCJS形式でbundleする。`.env`と`.sync-state.json`は実行時current directory基準であり、`dist/`はversion管理しない。
+`npm run build`は`src/index.js`と依存を`dist/r2-sync.bundle.cjs`へCJS形式でbundleする。`config.json`は`--config`で指定し、省略時は実行時current directoryの`config.json`を読む。`dist/`はversion管理しない。
 
 ## 関連
 

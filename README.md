@@ -11,7 +11,7 @@ obsidian-r2-sync-cli は、Remotely Save が使う暗号化フォーマット(`r
 ## 特徴
 
 - Remotely Save (`rclone-base64`方式) と暗号化フォーマット互換。同じパスワードで同じバケットを読み書きできる
-- 独自の3-way差分同期（前回状態をローカルの`.sync-state.json`で管理。Obsidian側の内部状態には依存しない）
+- 独自の3-way差分同期（前回状態を`config.json`の`statePath`で管理。Obsidian側の内部状態には依存しない）
 - 双方向: ローカル→リモート(PUSH)、リモート→ローカル(PULL)、削除の伝播
 - 既定は**dry-run**。実際の変更には `--apply` が必要、削除はさらに `--allow-delete` が必要
 - 両側変更時はmtimeが新しい方でそのまま上書き（バックアップコピーは作らない。git等で別途バージョン管理している運用を想定）
@@ -29,16 +29,18 @@ obsidian-r2-sync-cli は、Remotely Save が使う暗号化フォーマット(`r
 git clone <このリポジトリのURL>
 cd r2-sync
 npm install
-copy .env.example .env
-# .env を編集: VAULT_PATH, R2_*, SYNC_PASSWORD を設定
+copy config.example.json config.json
+# config.json を編集: 接続情報、vaultPath、password、mode を設定
 
 npm test          # 暗号化・同期ロジックの自己テスト(R2に接続しない)
-npm run sync      # dry-run。何が起きるか確認するだけで実際には変更しない
+npm run sync      # config.jsonを使ったdry-run
 npm run sync:apply       # 削除以外を実際に適用
 npm run sync:full        # 削除も含めて完全に適用
 ```
 
 詳しい手順は [`SETUP.md`](./SETUP.md)、共通設計は [`DESIGN.md`](./DESIGN.md)、実装別の詳細は [`DESIGN_NODE.md`](./DESIGN_NODE.md) と [`DESIGN_PYTHON.md`](./DESIGN_PYTHON.md) を参照してください。
+
+性能測定の条件・対象断面・結果は [`PERFORMANCE.md`](./PERFORMANCE.md) に記録しています。
 
 ## 安全設計
 

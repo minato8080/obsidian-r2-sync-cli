@@ -44,12 +44,12 @@ export function createR2Client(r2Config) {
   async function getObject(key) {
     const res = await client.send(new GetObjectCommand({ Bucket: r2Config.bucket, Key: key }));
     const bytes = await res.Body.transformToByteArray();
-    return { bytes, metadata: res.Metadata ?? {} };
+    return { bytes, metadata: res.Metadata ?? {}, etag: res.ETag };
   }
 
   async function headObject(key) {
     const res = await client.send(new HeadObjectCommand({ Bucket: r2Config.bucket, Key: key }));
-    return { metadata: res.Metadata ?? {} };
+    return { metadata: res.Metadata ?? {}, etag: res.ETag };
   }
 
   async function putObject(key, bytes, metadata) {

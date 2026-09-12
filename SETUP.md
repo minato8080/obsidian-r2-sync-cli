@@ -7,22 +7,23 @@ cd C:\path\to\r2-sync
 npm install
 ```
 
-## 2. `.env` の作成
+## 2. `config.json` の作成
 
 ```powershell
-copy .env.example .env
+copy config.example.json config.json
 ```
 
-`.env` を開いて以下を埋める。
+`config.json` を開いて以下を埋める。Node.js版とPython版は同じ設定形式を使用する。
 
-| 変数 | 説明 |
+| key | 説明 |
 |---|---|
-| `VAULT_PATH` | 同期するvaultの絶対パス（`<vault-path>`） |
-| `R2_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` 形式 |
-| `R2_BUCKET` | Remotely Save側の設定と同じバケット名 |
-| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2のAPIトークン |
-| `R2_REMOTE_PREFIX` | Remotely Save側で「Remote Prefix」を設定していればそれと同じ値。未設定なら空でよい |
-| `SYNC_PASSWORD` | Obsidianの Remotely Save 設定画面にある暗号化パスワード（encryption method が `rclone-base64` であることを確認） |
+| `vaultPath` | 同期するvaultの絶対パス（`<vault-path>`） |
+| `endpoint` | `https://<account-id>.r2.cloudflarestorage.com` 形式 |
+| `bucket` | Remotely Save側の設定と同じバケット名 |
+| `accessKeyId` / `secretAccessKey` | R2のAPIトークン |
+| `remotePrefix` | Remotely Save側で設定したRemote Prefix。未設定なら空 |
+| `password` | Remotely Saveの暗号化パスワード |
+| `mode` | `probe` または `full` |
 
 Remotely Saveの設定値はObsidianの `設定 → Remotely Save` から確認できる（`.obsidian/plugins/remotely-save/data.json` は暗号化されていて直接は読めない）。
 
@@ -50,7 +51,7 @@ npm test
 
 `PUSH`/`PULL`には`reason`が付くことがある（例:「両側変更・ローカルの方が新しいため上書き」「リモート削除だがローカルは編集済み: 編集を優先」）。両側変更時の判定方法は`DESIGN_NODE.md`の「同期判定」参照。
 
-`SEED`ばかりでなく大量の`PUSH`/`PULL`が「不一致による上書き」reason付きで出る場合は `SYNC_PASSWORD` や `R2_REMOTE_PREFIX` の設定が間違っている可能性が高い（暗号化キーが合わずファイル名/内容が正しく復号できていない）。**この場合は `--apply` を実行しないこと。**
+`SEED`ばかりでなく大量の`PUSH`/`PULL`が「不一致による上書き」reason付きで出る場合は `password` や `remotePrefix` の設定が間違っている可能性が高い。**この場合は `--apply` を実行しないこと。**
 
 ## 5. 初回実行は必ずdry-runから
 
@@ -87,7 +88,7 @@ node dist/r2-sync.bundle.cjs               # dry-run
 node dist/r2-sync.bundle.cjs --apply
 ```
 
-`.env` はプロジェクト直下（実行時のカレントディレクトリ）から読まれるので、`dist/r2-sync.bundle.cjs` をプロジェクト外に持ち出す場合は `.env` と `.sync-state.json` も同じディレクトリに置くこと。詳細は `DESIGN_NODE.md` の「実行と配布」参照。
+`config.json` は `--config` で指定できる。省略時は実行時のカレントディレクトリにある `config.json` を読む。状態ファイルは設定の `statePath` を使う。
 
 ## iOS full sync
 
@@ -143,5 +144,5 @@ Python版のR2取得並列数は`"fetchConcurrency": 2`（1〜16）、R2へのPU
 ## 実行のたびに確認すること
 
 - 両側で変更されたUTF-8テキストは、stateにmerge baseがあれば3-way mergeする。同じ行の変更、baseなし、またはバイナリではそのパスを競合としてskipし、どちらの内容も上書きしない。他の非競合パスは適用を継続し、未解決競合が残るため結果は`ok: false`になる。
-- `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db` に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは設定へ明示すること（Node.js版は`.env.example`、Python版は`py/config.example.json`と各設計書を参照）。指定を忘れると同期される。
-- ignoreパターンは設定ファイルのあるディレクトリを基準にしたGitignore風glob。専用フォルダに実行ファイルと設定をまとめた場合は`/**`でその配下をすべて除外できる。`/sync.py`は設定ファイルと同じディレクトリ直下、`sync.py`は配下の全階層に一致する。`./sync.py`は旧設定互換で`/sync.py`と同じ。
+- `.git/`, `node_modules/`, `.DS_Store`, `Thumbs.db`, `state.json`に加え、本ツールが使用中の設定・stateは自動保護される。それ以外の秘匿フォルダやツール配置先など、除外したいパスは`config.json`の`ignoreExtra`へ明示すること（`config.example.json`参照）。指定を忘れると同期される。
+- ignoreパターンはVaultルートを基準にしたGitignore風glob。専用フォルダに実行ファイルと設定をまとめた場合は、そのVault相対パスを`ignoreExtra`へ指定する。`/tools/sync.py`はVault直下のtoolsだけ、`sync.py`は全階層に一致する。`./sync.py`は`/sync.py`と同じ。

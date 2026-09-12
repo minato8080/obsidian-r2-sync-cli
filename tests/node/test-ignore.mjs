@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,17 +48,15 @@ assert.equal(rootBased.isIgnoredFile("note.md"), true);
 const smokeRoot = mkdtempSync(path.join(os.tmpdir(), "r2-sync-index-smoke-"));
 try {
   const indexPath = fileURLToPath(new URL("../../src/index.js", import.meta.url));
+  const configPath = path.join(smokeRoot, "config.json");
+  writeFileSync(configPath, JSON.stringify({
+    vaultPath: path.join(smokeRoot, "vault"), statePath: "state.json",
+    endpoint: "http://127.0.0.1:1", bucket: "placeholder",
+    accessKeyId: "placeholder", secretAccessKey: "placeholder",
+    password: "placeholder", encryption: "plain", mode: "full",
+  }));
   const smoke = spawnSync(process.execPath, [indexPath], {
     cwd: smokeRoot,
-    env: {
-      ...process.env,
-      VAULT_PATH: path.join(smokeRoot, "vault"),
-      R2_ENDPOINT: "http://127.0.0.1:1",
-      R2_BUCKET: "placeholder",
-      R2_ACCESS_KEY_ID: "placeholder",
-      R2_SECRET_ACCESS_KEY: "placeholder",
-      SYNC_PASSWORD: "placeholder",
-    },
     encoding: "utf8",
     timeout: 10_000,
   });

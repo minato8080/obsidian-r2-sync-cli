@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+config.json
 .sync-state.json
 r2-sync-config.json
 r2-sync-state.json
