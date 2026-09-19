@@ -33,6 +33,12 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期す
 - Remotely SaveのPolyForm Strict License対象コードは移植せず、暗号化形式の互換性と一般的な3-way比較に基づく独自実装とする。
 - Remotely Save本体の同期履歴はローカルDBにあり外部CLIから共有できないため、Node.js版とPython版はそれぞれ専用checkpointを持つ。
 
+## 任意のR2 sidecar manifest
+
+`manifestObjectKey`と独立した`manifestKey`を設定した場合、prefix配下の同期対象remote keyをキーにしたJSON manifestをR2へ保存する。形式は`version: 1`、`algorithm: "HMAC-SHA256"`、`prefix`、`entries`（`etag`、平文`size`、manifest keyで計算したhex fingerprint）で、Node/Pythonが同じUTF-8文字列とHMAC-SHA-256を使う。manifest用secretは通常の内容暗号passwordと分け、manifestには平文または生SHA-256を入れない。
+
+manifest object自体は暗号化objectではなく予約objectであり、一覧・復号・同期・削除から除外する。読み込みはヒントとして扱い、欠落・不正・stale（現行一覧とのkey集合不一致）・ETag不一致は失敗にせず従来のbody比較へ戻す。fingerprintと現行ETagが一致するlocal/remote共存候補だけbody GETなしでSEEDし、remote-only候補は常にGETする。apply完了後に現行一覧とlocal内容からmanifestを作り、単一PUTする。state保存とR2 PUTは分散した処理なので、どちらかの途中失敗時は次回body比較で再検証する。dry-runと旧設定（manifest未設定）はmanifestを読み書きしない。
+
 ## 関連
 
 - [REQUIREMENTS.md](REQUIREMENTS.md)

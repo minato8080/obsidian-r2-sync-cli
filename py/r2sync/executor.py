@@ -25,6 +25,7 @@ from .local import (
     _vault_path,
     atomic_replace,
 )
+from .manifest import build_manifest, content_fingerprint, parse_manifest
 from .planner import _action_counts, classify_sync_path, conflict_copy_path, three_way_merge
 from .remote import (
     _collect_remote_objects,
@@ -186,6 +187,8 @@ def execute_full_sync(
     fetch_concurrency: int = 2,
     apply_concurrency: int = 1,
     unicode_collision_policy: str = "error",
+    manifest_object_key: str | None = None,
+    manifest_key: str | None = None,
     progress=None,
 ) -> dict:
     """Run the opt-in full bidirectional sync path.
@@ -212,11 +215,12 @@ def execute_full_sync(
     scan_local_ms = round((time.perf_counter() - scan_local_started) * 1000, 2)
     list_remote_started = time.perf_counter()
     listed = list_remote(remote_prefix)
+    reserved_keys = {manifest_object_key} if manifest_object_key else set()
     list_remote_ms = round((time.perf_counter() - list_remote_started) * 1000, 2)
     decode_remote_started = time.perf_counter()
     remotes, ignored_remote, list_conflicts = _collect_remote_objects(
         listed, decoder, remote_prefix, extra_patterns, protected_paths,
-        unicode_collision_policy, collision_stats,
+        unicode_collision_policy, collision_stats, reserved_keys,
     )
     decode_remote_ms = round((time.perf_counter() - decode_remote_started) * 1000, 2)
     reconcile_local_started = time.perf_counter()
@@ -229,6 +233,20 @@ def execute_full_sync(
     if reconciled_local_files:
         _emit_progress(progress, f"local paths reconciled: {reconciled_local_files}件")
     scan_finished = time.perf_counter()
+    manifest = None
+    manifest_status = "disabled" if not (manifest_object_key and manifest_key) else "absent"
+    if manifest_object_key and manifest_key:
+        try:
+            remote_manifest = fetch(manifest_object_key)
+            manifest = parse_manifest(
+                remote_manifest.data,
+                {item["key"] for item in remotes.values()},
+                remote_prefix,
+                manifest_object_key,
+            )
+            manifest_status = "valid" if manifest else "stale-or-invalid"
+        except Exception:
+            manifest_status = "absent"
     scan_ms = round((scan_finished - started) * 1000, 2)
     actions = []
     candidates = []
@@ -272,7 +290,11 @@ def execute_full_sync(
             candidates.append({"type": "BOTH_CHANGED", "path": rel_path, "remote": remote, "prev": prev, "localBytes": _vault_path(vault, rel_path).read_bytes(), "localMtimeMs": local_info["mtimeMs"]})
         elif decision_type == "LOCAL_CHANGED":
             local_bytes = _vault_path(vault, rel_path).read_bytes()
-            if prev.get("localContentHash") and hashlib.sha256(local_bytes).hexdigest() == prev["localContentHash"]:
+            manifest_entry = manifest.get("entries", {}).get(remote["key"]) if manifest and remote else None
+            manifest_match = bool(manifest_entry and manifest_entry.get("etag") == remote.get("etag") and manifest_entry.get("size") == len(local_bytes) and content_fingerprint(local_bytes, manifest_key) == manifest_entry.get("fingerprint"))
+            if manifest_match:
+                actions.append({"type": "SEED", "path": rel_path, "remote": remote, "localBytes": local_bytes, "reason": "manifest fingerprint一致・body取得を省略"})
+            elif prev.get("localContentHash") and hashlib.sha256(local_bytes).hexdigest() == prev["localContentHash"]:
                 actions.append({"type": "SEED", "path": rel_path, "remote": remote, "localBytes": local_bytes, "reason": "mtime変化のみ・内容一致のため転送スキップ"})
             else:
                 actions.append({"type": "PUSH", "path": rel_path, "remote": remote, "localBytes": local_bytes, "localMtimeMs": local_info["mtimeMs"], "enabled": push})
@@ -287,9 +309,13 @@ def execute_full_sync(
 
     def fetch_candidate(candidate):
         remote_info = candidate["remote"]
+        local_bytes = candidate.get("localBytes")
+        manifest_entry = manifest.get("entries", {}).get(remote_info["key"]) if manifest and local_bytes is not None else None
+        if manifest_entry and manifest_entry.get("etag") == remote_info.get("etag") and manifest_entry.get("size") == len(local_bytes) and content_fingerprint(local_bytes, manifest_key) == manifest_entry.get("fingerprint"):
+            return candidate, None, local_bytes, True
         remote = fetch(remote_info["key"])
         clear = decoder.decrypt_content(remote.data)
-        return candidate, remote, clear
+        return candidate, remote, clear, False
 
     errors = []
     if candidates:
@@ -300,11 +326,14 @@ def execute_full_sync(
     )
     for candidate, future in completed:
         try:
-            candidate, remote_object, remote_bytes = future.result()
+            candidate, remote_object, remote_bytes, manifest_match = future.result()
             prepared_count += 1
             path_name = candidate["path"]
             remote_info = candidate["remote"]
             local_bytes = candidate.get("localBytes")
+            if manifest_match:
+                actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "manifest fingerprint一致・body取得を省略"})
+                continue
             if candidate["type"] == "REMOTE_CHANGED" and remote_bytes == local_bytes:
                 actions.append({"type": "SEED", "path": path_name, "remote": remote_info, "localBytes": local_bytes, "reason": "リモート再アップロードのみ・内容一致のため転送スキップ"})
             elif candidate["type"] == "REMOTE_CHANGED":
@@ -378,6 +407,9 @@ def execute_full_sync(
         "errors": errors, "conflicts": conflicts, "ignoredRemoteObjects": ignored_remote,
         "remoteSnapshotRecheckEnabled": recheck_remote_before_apply,
         "remoteSnapshotRechecked": False,
+        "manifestStatus": manifest_status,
+        "manifestUsed": bool(manifest),
+        "manifestUpdated": False,
         "fetchConcurrency": fetch_concurrency,
         "applyConcurrency": apply_concurrency,
         "mergeBasesPruned": 0, "mergeBasesPendingPrune": merge_bases_to_prune,
@@ -422,6 +454,42 @@ def execute_full_sync(
         result["timingsMs"]["apply"] = round((time.perf_counter() - apply_started) * 1000, 2)
         result["timingsMs"]["applyRemote"] = round(apply_remote_seconds * 1000, 2)
         result["timingsMs"]["applyCheckpoint"] = round(apply_checkpoint_seconds * 1000, 2)
+
+    def update_manifest() -> None:
+        if not result["ok"] or not (manifest_object_key and manifest_key) or (not applicable_actions and manifest_status == "valid"):
+            return
+        try:
+            final_listed = list_remote(remote_prefix)
+            final_remotes, _, final_conflicts = _collect_remote_objects(
+                final_listed, decoder, remote_prefix, extra_patterns, protected_paths,
+                unicode_collision_policy, reserved_keys=reserved_keys,
+            )
+            if final_conflicts:
+                raise PullError("cannot create manifest from an invalid remote listing")
+            entries = {}
+            complete = True
+            for path_name, remote in final_remotes.items():
+                if not isinstance(remote.get("etag"), str):
+                    complete = False
+                    break
+                try:
+                    data = _vault_path(vault, path_name).read_bytes()
+                except FileNotFoundError:
+                    complete = False
+                    break
+                entries[remote["key"]] = {
+                    "etag": remote["etag"],
+                    "size": len(data),
+                    "fingerprint": content_fingerprint(data, manifest_key),
+                }
+            if complete:
+                put(manifest_object_key, build_manifest(entries, remote_prefix), time.time() * 1000)
+                result["manifestUpdated"] = True
+            else:
+                result["manifestStatus"] = "not-written-incomplete"
+        except Exception as error:
+            result["errors"].append({"path": "<manifest>", "error": str(error)})
+            result["ok"] = False
 
     def exclude_conflicted_actions(actions: list[dict], paths: set[str]) -> list[dict]:
         if not paths:
@@ -493,6 +561,7 @@ def execute_full_sync(
                 result["ok"] = False
                 result["errors"].append({"path": "<state>", "error": str(error)})
             finish_apply_timing(apply_started)
+        update_manifest()
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
@@ -507,7 +576,7 @@ def execute_full_sync(
             latest_listed = list_remote(remote_prefix)
             latest_remotes, _, latest_conflicts = _collect_remote_objects(
                 latest_listed, decoder, remote_prefix, extra_patterns, protected_paths,
-                unicode_collision_policy,
+                unicode_collision_policy, reserved_keys=reserved_keys,
             )
             result["conflicts"].extend(latest_conflicts)
             snapshot_conflict_paths.update(
@@ -545,6 +614,7 @@ def execute_full_sync(
                 result["ok"] = False
                 result["errors"].append({"path": "<state>", "error": str(error)})
             finish_apply_timing(apply_started)
+        update_manifest()
         result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
         return result
 
@@ -729,6 +799,7 @@ def execute_full_sync(
         except Exception as error:
             result["ok"] = False
             result["errors"].append({"path": "<state>", "error": str(error)})
+    update_manifest()
     finish_apply_timing(apply_started)
     result["timingsMs"]["total"] = round((time.perf_counter() - started) * 1000, 2)
     return result

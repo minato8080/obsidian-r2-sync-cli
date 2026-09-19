@@ -19,6 +19,7 @@ py/
     ├── crypto.py           # rclone-base64名前/内容暗号
     ├── local.py            # path安全性、ignore、Vault走査、atomic replace、run lock
     ├── checkpoint.py       # state読書き、merge base管理
+    ├── manifest.py         # sidecar manifestのHMAC fingerprint
     ├── remote.py           # SigV4 R2 client、remote一覧正規化、並列read
     ├── planner.py          # pureなaction分類と3-way text merge
     ├── executor.py         # Probe/full orchestration、再検証、適用
@@ -151,6 +152,10 @@ python -m unittest discover -s tests/python -t .
 ├── r2-sync-config.json
 └── r2-sync-state.json
 ```
+
+### sidecar manifest
+
+任意の`manifestObjectKey`（remote prefix相対）と独立した`manifestKey`を指定すると、R2の予約objectへNode版と共通のHMAC-SHA-256 sidecar manifestを保存する。manifestは現行一覧とのkey集合、prefix、ETagを検証し、fingerprint一致のlocal/remote候補だけGETなしでSEEDする。remote-only、欠落・不正・stale・ETag不一致はbody取得へ戻る。apply成功後だけ単一PUTし、dry-runではmanifestを変更しない。
 
 ## 自己更新とリリース
 

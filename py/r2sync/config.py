@@ -56,4 +56,16 @@ def _load_config(path: Path) -> dict:
     unicode_collision_policy = config.get("unicodeCollisionPolicy", "error")
     if not isinstance(unicode_collision_policy, str) or unicode_collision_policy not in UNICODE_COLLISION_POLICIES:
         raise PullError("unicodeCollisionPolicy must be error or prefer-nfc")
+    manifest_object_key = config.get("manifestObjectKey")
+    manifest_key = config.get("manifestKey")
+    if manifest_object_key is not None and (
+        not isinstance(manifest_object_key, str) or not manifest_object_key.strip()
+        or manifest_object_key.startswith("/")
+        or any(part in ("", ".", "..") for part in manifest_object_key.replace("\\", "/").split("/"))
+    ):
+        raise PullError("manifestObjectKey must be a safe non-empty relative path")
+    if manifest_key is not None and (not isinstance(manifest_key, str) or not manifest_key):
+        raise PullError("manifestKey must be a non-empty string")
+    if (manifest_object_key is None) != (manifest_key is None):
+        raise PullError("manifestObjectKey and manifestKey must be configured together")
     return config

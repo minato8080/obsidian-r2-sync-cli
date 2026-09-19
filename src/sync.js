@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { runPool, DEFAULT_CONCURRENCY } from "./concurrency.js";
 import { entryFromStat, baseBytes, sha256Hex, saveState } from "./state.js";
 import { assertVaultPath, reconcileLocalFiles, vaultPath } from "./localFiles.js";
+import { buildManifest, contentFingerprint, parseManifest } from "./manifest.js";
 
 const equal = (a, b) => Buffer.from(a).equals(Buffer.from(b));
 const hash = (data) => crypto.createHash("sha256").update(data).digest("hex");
@@ -84,10 +85,11 @@ export function threeWayMerge(base, local, remote) {
   output.push(...baseLines.slice(cursor)); return { data: Buffer.from(output.join("")), conflict: false };
 }
 
-async function collectRemote(remoteItems, cipher, prefix, ignoreMatcher, policy = "error", stats = { ignored: 0 }) {
+async function collectRemote(remoteItems, cipher, prefix, ignoreMatcher, policy = "error", stats = { ignored: 0 }, reservedKeys = new Set()) {
   const grouped = new Map(), ignored = [], conflicts = [];
   for (const raw of remoteItems) {
     if (!raw || typeof raw.key !== "string") { conflicts.push({ path: "<remote-list>", reason: "R2 LIST returned an invalid object" }); continue; }
+    if (reservedKeys.has(raw.key)) continue;
     if (prefix && !raw.key.startsWith(prefix)) continue;
     const encoded = prefix ? raw.key.slice(prefix.length) : raw.key;
     try {
@@ -107,7 +109,7 @@ async function collectRemote(remoteItems, cipher, prefix, ignoreMatcher, policy 
   return { remotes, ignored, conflicts };
 }
 
-export async function planSync({ vaultPath: root, localFiles, remoteItems, remoteMap, prevEntries, ignoreMatcher, cipher, r2Prefix, r2, unicodeCollisionPolicy = "error", collisionStats = { ignored: 0 }, merge = false }) {
+export async function planSync({ vaultPath: root, localFiles, remoteItems, remoteMap, prevEntries, ignoreMatcher, cipher, r2Prefix, r2, unicodeCollisionPolicy = "error", collisionStats = { ignored: 0 }, merge = false, manifest = null, manifestKey = null }) {
   const remoteByPath = remoteMap ?? (await collectRemote(remoteItems, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy, collisionStats)).remotes;
   const actions = [], candidates = [];
   const paths = [...new Set([...localFiles.keys(), ...remoteByPath.keys(), ...Object.keys(prevEntries)])].sort();
@@ -133,6 +135,13 @@ export async function planSync({ vaultPath: root, localFiles, remoteItems, remot
   }
   await runPool(candidates, DEFAULT_CONCURRENCY, async (candidate) => {
     const localBytes = await fs.readFile(vaultPath(root, candidate.relPath));
+    const manifestEntry = manifest?.entries?.[candidate.rem.key];
+    const manifestMatch = Boolean(manifest && manifestEntry && manifestEntry.etag === candidate.rem.etag && manifestEntry.size === localBytes.length && contentFingerprint(localBytes, manifestKey) === manifestEntry.fingerprint);
+    if (manifestMatch) {
+      const localHash = hash(localBytes);
+      actions.push({ type: "SEED", relPath: candidate.relPath, localSnapshotHash: localHash, remoteEtag: candidate.rem.etag, localContentHash: localHash, reason: "manifest fingerprint一致・body取得を省略" });
+      return;
+    }
     if (candidate.type === "LOCAL_CHANGED") { const current = hash(localBytes); actions.push(current === candidate.prev.localContentHash ? { type: "SEED", relPath: candidate.relPath, localSnapshotHash: current, remoteEtag: candidate.rem.etag, localContentHash: current } : { type: "PUSH", relPath: candidate.relPath, localSnapshotHash: current }); return; }
     const remote = await r2.getObject(candidate.rem.key), remoteBytes = Buffer.from(await cipher.decryptContent(remote.bytes));
     if (equal(localBytes, remoteBytes)) { actions.push({ type: "SEED", relPath: candidate.relPath, localSnapshotHash: hash(localBytes), remoteEtag: candidate.rem.etag, localContentHash: hash(localBytes) }); return; }
@@ -225,18 +234,27 @@ export async function applyActions({ actions, vaultPath: root, localFiles, prevE
 
 export async function executeFullSync(options) {
   const started = performance.now(), root = path.resolve(options.vaultPath), statePath = path.resolve(options.statePath), progress = options.progress ?? (() => {}), collisionStats = { ignored: 0 };
-  const { listRemote, getObject, putObject, deleteObject, cipher, r2Prefix = "", extraPatterns = [], protectedRelPaths = [], unicodeCollisionPolicy = "error" } = options;
+  const { listRemote, getObject, putObject, deleteObject, cipher, r2Prefix = "", extraPatterns = [], protectedRelPaths = [], unicodeCollisionPolicy = "error", manifestObjectKey = null, manifestKey = null } = options;
+  const reservedKeys = new Set(manifestObjectKey ? [manifestObjectKey] : []);
   const ignoreMatcher = options.ignoreMatcher;
   const localStarted = performance.now();
   const localFiles = await options.listLocalFiles(root, ignoreMatcher, { unicodeCollisionPolicy, aliasStats: collisionStats });
   const scanLocal = performance.now() - localStarted;
   const listStarted = performance.now(), listed = await listRemote(); const listRemoteMs = performance.now() - listStarted;
-  const decodeStarted = performance.now(), collected = await collectRemote(listed, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy, collisionStats); const decodeRemote = performance.now() - decodeStarted;
+  const decodeStarted = performance.now(), collected = await collectRemote(listed, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy, collisionStats, reservedKeys); const decodeRemote = performance.now() - decodeStarted;
   const reconcileStarted = performance.now(), reconciled = await reconcileLocalFiles(root, localFiles, collected.remotes.keys()); const reconcileLocal = performance.now() - reconcileStarted;
   const previous = await options.loadState(statePath, unicodeCollisionPolicy, collisionStats);
+  let manifest = null, manifestStatus = manifestObjectKey && manifestKey ? "absent" : "disabled";
+  if (manifestObjectKey && manifestKey) {
+    try {
+      const remoteManifest = await options.getObject(manifestObjectKey);
+      manifest = parseManifest(remoteManifest.bytes, { listedKeys: [...collected.remotes.values()].map((item) => item.key), prefix: r2Prefix, reservedKey: manifestObjectKey });
+      manifestStatus = manifest ? "valid" : "stale-or-invalid";
+    } catch { manifestStatus = "absent"; }
+  }
   progress(`local files: ${localFiles.size}件 / remote objects: ${listed.length}件 / 前回状態: ${Object.keys(previous).length}件`);
   if (reconciled) progress(`local paths reconciled: ${reconciled}件`);
-  const actions = await planSync({ vaultPath: root, localFiles, remoteItems: listed, remoteMap: collected.remotes, prevEntries: previous, ignoreMatcher, cipher, r2Prefix, r2: { getObject }, unicodeCollisionPolicy, collisionStats, merge: true });
+  const actions = await planSync({ vaultPath: root, localFiles, remoteItems: listed, remoteMap: collected.remotes, prevEntries: previous, ignoreMatcher, cipher, r2Prefix, r2: { getObject }, unicodeCollisionPolicy, collisionStats, merge: true, manifest, manifestKey });
   const conflictsFromActions = actions.filter(({ type }) => type === "CONFLICT").map((action) => ({ path: action.relPath, reason: action.reason }));
   const conflicts = [...collected.conflicts, ...conflictsFromActions];
   const blockedPaths = new Set(conflicts.filter((item) => item.path && item.path !== "<remote-list>").map((item) => item.path));
@@ -244,7 +262,7 @@ export async function executeFullSync(options) {
   const applicable = rawApplicable.filter((action) => !blockedPaths.has(action.relPath));
   const grouped = Object.groupBy ? Object.groupBy(actions, (a) => a.type) : actions.reduce((m, a) => ((m[a.type] ??= []).push(a), m), {});
   for (const [type, items] of Object.entries(grouped)) { progress(`\n[${type}] ${items.length}件`); for (const item of items.slice(0, 20)) progress(`  ${item.relPath}${item.reason ? ` (${item.reason})` : ""}`); if (items.length > 20) progress(`  ...ほか${items.length - 20}件`); }
-  const result = { ok: conflicts.length === 0, mode: options.apply ? "apply" : "dry-run", unchanged: actions.filter(({ type }) => type === "NOOP").length, scannedLocal: localFiles.size, scannedRemote: listed.length, planned: applicable.length, validated: 0, applied: 0, reconciledLocalFiles: reconciled, unicodeAliasesIgnored: collisionStats.ignored, errors: [], conflicts, ignoredRemoteObjects: collected.ignored, remoteSnapshotRecheckEnabled: options.recheckRemoteBeforeApply !== false, remoteSnapshotRechecked: false, plannedByType: Object.fromEntries(Object.entries(grouped).filter(([type]) => !["NOOP", "CONFLICT"].includes(type)).map(([type, values]) => [type, values.length])), appliedByType: {}, skippedByType: {}, timingsMs: { scan: performance.now() - started, scanLocal, listRemote: listRemoteMs, decodeRemote, reconcileLocal, conflictCheck: 0, fetchValidate: 0, snapshotCheck: 0, apply: 0, applyRemote: 0, applyCheckpoint: 0 } };
+  const result = { ok: conflicts.length === 0, mode: options.apply ? "apply" : "dry-run", unchanged: actions.filter(({ type }) => type === "NOOP").length, scannedLocal: localFiles.size, scannedRemote: listed.length, planned: applicable.length, validated: 0, applied: 0, reconciledLocalFiles: reconciled, unicodeAliasesIgnored: collisionStats.ignored, errors: [], conflicts, ignoredRemoteObjects: collected.ignored, remoteSnapshotRecheckEnabled: options.recheckRemoteBeforeApply !== false, remoteSnapshotRechecked: false, manifestStatus, manifestUsed: Boolean(manifest), manifestUpdated: false, plannedByType: Object.fromEntries(Object.entries(grouped).filter(([type]) => !["NOOP", "CONFLICT"].includes(type)).map(([type, values]) => [type, values.length])), appliedByType: {}, skippedByType: {}, timingsMs: { scan: performance.now() - started, scanLocal, listRemote: listRemoteMs, decodeRemote, reconcileLocal, conflictCheck: 0, fetchValidate: 0, snapshotCheck: 0, apply: 0, applyRemote: 0, applyCheckpoint: 0 } };
   for (const action of rawApplicable.filter((item) => blockedPaths.has(item.relPath))) result.skippedByType[action.type] = (result.skippedByType[action.type] ?? 0) + 1;
   if (!options.apply) { result.timingsMs.total = performance.now() - started; return result; }
   const hasGlobalConflict = conflicts.some((item) => item.path === "<remote-list>");
@@ -253,7 +271,7 @@ export async function executeFullSync(options) {
     const checkStarted = performance.now();
     try {
       const latest = await listRemote();
-       const latestCollected = await collectRemote(latest, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy);
+       const latestCollected = await collectRemote(latest, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy, { ignored: 0 }, reservedKeys);
        result.conflicts.push(...latestCollected.conflicts);
        const changed = new Set();
       for (const relPath of new Set([...collected.remotes.keys(), ...latestCollected.remotes.keys()])) {
@@ -286,6 +304,29 @@ export async function executeFullSync(options) {
     result.timingsMs.apply = performance.now() - started - result.timingsMs.scan;
     result.timingsMs.applyRemote = applyTimings.remote;
     result.timingsMs.applyCheckpoint = applyTimings.checkpoint;
+    if (result.errors.length === 0 && result.conflicts.length === 0 && manifestObjectKey && manifestKey && (applicable.length > 0 || manifestStatus !== "valid")) {
+      try {
+        const finalListed = await listRemote();
+        const finalCollected = await collectRemote(finalListed, cipher, r2Prefix, ignoreMatcher, unicodeCollisionPolicy, { ignored: 0 }, reservedKeys);
+        if (finalCollected.conflicts.length) throw new Error("cannot create manifest from an invalid remote listing");
+        const entries = Object.create(null);
+        let complete = true;
+        for (const [relPath, remote] of finalCollected.remotes) {
+          if (typeof remote.etag !== "string") { complete = false; break; }
+          let bytes;
+          try { bytes = await fs.readFile(await assertVaultPath(root, relPath)); }
+          catch (error) { if (error.code === "ENOENT") { complete = false; break; } throw error; }
+          entries[remote.key] = { etag: remote.etag, size: bytes.length, fingerprint: contentFingerprint(bytes, manifestKey) };
+        }
+        if (complete) {
+          await options.putObject(manifestObjectKey, Buffer.from(buildManifest(entries, r2Prefix)), {});
+          result.manifestUpdated = true;
+        } else result.manifestStatus = "not-written-incomplete";
+      } catch (error) {
+        result.manifestUpdated = false;
+        result.errors.push({ path: "<manifest>", error: error.message });
+      }
+    }
   }
   result.ok = result.errors.length === 0 && result.conflicts.length === 0; result.timingsMs.total = performance.now() - started; return result;
 }
