@@ -1,5 +1,15 @@
 # r2-sync プロジェクト運用
 
+## Global Agent Harness
+
+このProjectは`development` Harness Profileを使用する。普遍的な安全、secret保護、Main Agent ownership、context boundary、subagent利用、model escalation、approval、auditabilityは、user-levelのGlobal Invariantsに従い、このProjectからoverrideできない。
+
+通常loopはMain Agentが`understand → investigate → plan → implement → deterministic verification → diagnose/fix → self-review → risk assessment`を継続して担当する。subagentは大規模探索・独立仕様調査・非依存並列・独立reviewに限り、task ownershipをhandoffしない。
+
+このProject固有のverificationは`npm test`、必要時の`npm run build`、公開情報チェック、dry-run結果確認である。`npm run sync:apply`、`npm run sync:full`、R2変更、Vault書き込み、削除、公開はexternal side effectとし、対象・scope・影響を確認して明示承認された場合だけ実行する。`--allow-delete`は特に不可逆操作として扱う。
+
+common safety policyやHarness Coreをこのrepositoryへコピーしない。以下のProject Policyは、公開リポジトリ制約、R2/Vault同期仕様、dry-run、個人情報・secret禁止という差分だけを保持する。
+
 このリポジトリは公開プロジェクトである。公開利用者に一般化できない個人環境の情報や運用は、リポジトリへ持ち込まない。
 
 ## 配置の境界

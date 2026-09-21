@@ -8,3 +8,4 @@ r2-sync-state.json
 *.log
 __pycache__/
 *.py[cod]
+/wasm/target/
