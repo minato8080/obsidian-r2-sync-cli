@@ -1,70 +1,70 @@
-# r2-sync プロジェクト運用
+# r2-sync Project Operations
 
 ## Global Agent Harness
 
-このProjectは`development` Harness Profileを使用する。普遍的な安全、secret保護、Main Agent ownership、context boundary、subagent利用、model escalation、approval、auditabilityは、user-levelのGlobal Invariantsに従い、このProjectからoverrideできない。
+This Project uses the `development` Harness Profile. Universal safety, secret protection, Main Agent ownership, context boundaries, subagent use, model escalation, approval, and auditability follow the user-level Global Invariants and cannot be overridden by this Project.
 
-通常loopはMain Agentが`understand → investigate → plan → implement → deterministic verification → diagnose/fix → self-review → risk assessment`を継続して担当する。subagentは大規模探索・独立仕様調査・非依存並列・独立reviewに限り、task ownershipをhandoffしない。
+The Main Agent continuously owns the normal loop: `understand → investigate → plan → implement → deterministic verification → diagnose/fix → self-review → risk assessment`. Use subagents only for large-scale exploration, independent specification research, non-dependent parallel work, or independent review; do not hand off task ownership.
 
-このProject固有のverificationは`npm test`、必要時の`npm run build`、公開情報チェック、dry-run結果確認である。`npm run sync:apply`、`npm run sync:full`、R2変更、Vault書き込み、削除、公開はexternal side effectとし、対象・scope・影響を確認して明示承認された場合だけ実行する。`--allow-delete`は特に不可逆操作として扱う。
+Project-specific verification consists of `npm test`, `npm run build` when needed, public-content checks, and dry-run result review. Treat `npm run sync:apply`, `npm run sync:full`, R2 changes, Vault writes, deletions, and publication as external side effects; execute them only after confirming the target, scope, and impact and receiving explicit approval. Treat `--allow-delete` as especially irreversible.
 
-common safety policyやHarness Coreをこのrepositoryへコピーしない。以下のProject Policyは、公開リポジトリ制約、R2/Vault同期仕様、dry-run、個人情報・secret禁止という差分だけを保持する。
+Do not copy common safety policy or the Harness Core into this repository. The Project Policy below keeps only the differences for public-repository constraints, R2/Vault synchronization, dry-runs, and prohibitions on personal information and secrets.
 
-このリポジトリは公開プロジェクトである。公開利用者に一般化できない個人環境の情報や運用は、リポジトリへ持ち込まない。
+This is a public repository. Do not bring personal environment information or operations that cannot be generalized for public users into the repository.
 
-## 配置の境界
+## Placement Boundaries
 
-- 要件定義は `REQUIREMENTS.md`、共通設計は `DESIGN.md`、実装別設計は `DESIGN_NODE.md` と `DESIGN_PYTHON.md` に保存する
-- Node.js版ソースは `src/`、iOS/a-Shell向けPython版ソースは `py/` に置く
-- 利用者環境のVault内にある生成済みバンドル配置先は、正本ではない
-- 利用者固有のVaultパス、ショートカット、ログ、設定は利用者側で管理する
+- Store requirements in `REQUIREMENTS.md`, shared design in `DESIGN.md`, and implementation-specific design in `DESIGN_NODE.md` and `DESIGN_PYTHON.md`.
+- Keep the Node.js source in `src/` and the iOS/a-Shell Python source in `py/`.
+- Generated bundle locations inside a user's Vault are not canonical sources.
+- Users manage their own Vault paths, shortcuts, logs, and settings.
 
-## 公開リポジトリの禁止事項
+## Public Repository Prohibitions
 
-- 個人名、個人用絶対パス、Vault名、端末固有ID、アカウントID、実バケット名、実エンドポイントを記載・コミットしない
-- APIキー、パスワード、Cookie、トークン、認証済みレスポンス、生ログを記載・コミットしない
-- 個人Vaultのフォルダ構成や、特定ユーザーだけの連携手順を要件・設計・READMEへ記載しない
-- 例示には `<project-root>`、`<vault-path>`、`<account-id>`、`<bucket-name>` などのプレースホルダーを使う
-- 利用者固有の調査結果・環境制約は、公開リポジトリ外のナレッジへ保存する
+- Do not record or commit personal names, personal absolute paths, Vault names, device-specific IDs, account IDs, real bucket names, or real endpoints.
+- Do not record or commit API keys, passwords, cookies, tokens, authenticated responses, or raw logs.
+- Do not put a personal Vault's folder structure or user-specific integration procedures in requirements, design documents, or the README.
+- Use placeholders such as `<project-root>`, `<vault-path>`, `<account-id>`, and `<bucket-name>` in examples.
+- Store user-specific investigation results and environment constraints outside the public repository.
 
-## 公開前ハーネスチェック
+## Pre-Publication Harness Checks
 
-公開情報チェックは、まずこのハーネスの作業ルールとして実施する。GitHub Actionsによる自動チェックは必須要件ではなく、別途導入が決まった場合だけ追加する。
+Run public-content checks first as part of this harness's workflow. GitHub Actions automation is not required; add it only when separately decided.
 
-通常のコミットでは、バージョン管理された `.githooks/pre-commit` も実行する。clone後は `npm run setup-hooks` で有効化する。hookはstaged差分だけをローカル検査し、外部通信を行わない。
+For normal commits, also run the version-controlled `.githooks/pre-commit`. After cloning, enable it with `npm run setup-hooks`. The hook checks only the staged diff locally and performs no external communication.
 
-コミット前に次を確認する。
+Before committing, verify the following:
 
-1. 変更対象が意図したファイルだけである
-2. 個人パス、Vault名、端末固有情報、実バケット情報がない
-3. APIキー、パスワード、Cookie、トークン、認証済みレスポンス、生ログがない
-4. 実値の`config.json`、同期状態ファイル、個人用設定がステージされていない
-5. ドキュメントの例がプレースホルダーになっている
-6. 仕様・設計・コードの変更内容が公開利用者にも一般化できる
+1. Only intended files are changed.
+2. No personal paths, Vault names, device-specific information, or real bucket information is present.
+3. No API keys, passwords, cookies, tokens, authenticated responses, or raw logs are present.
+4. No populated `config.json`, sync-state file, or personal configuration is staged.
+5. Documentation examples use placeholders.
+6. Requirements, design, and code changes are generalizable to public users.
 
-pre-commit hookは上記のうち機械的に判定できる項目と `npm test` を検査する。ハーネス側ではhookの結果だけに依存せず、公開内容全体を確認する。`--no-verify` による回避は行わない。
+The pre-commit hook checks the mechanically decidable items above and runs `npm test`. The harness must inspect the full public content instead of relying only on the hook result. Do not bypass it with `--no-verify`.
 
-1つでも判断できない項目がある場合は、コミットを止めて確認する。
+If any item cannot be judged, stop the commit and investigate.
 
-## 変更手順
+## Change Procedure
 
-1. 仕様変更は `REQUIREMENTS.md` を先に更新する
-2. 構成変更は `DESIGN.md` を更新する
-3. 実装は `src/` または `py/` で行う
-4. Node.js版は `npm test` を実行する
-5. 配布が必要な場合だけ `npm run build` でバンドルを生成する
-6. 公開前に個人情報・秘密情報・環境固有パス・未整理のログが混入していないか確認する
+1. Update `REQUIREMENTS.md` first for requirement changes.
+2. Update `DESIGN.md` for structural changes.
+3. Implement in `src/` or `py/`.
+4. Run `npm test` for the Node.js version.
+5. Generate a bundle with `npm run build` only when distribution is required.
+6. Before publication, check for personal information, secrets, environment-specific paths, and uncurated logs.
 
-## セキュリティ
+## Security
 
-- 実値の`config.json`、アクセスキー、パスワード、個人用絶対パスを読んだりコミットしたりしない
-- `config.example.json`にはプレースホルダーだけを書く
-- iOS版の状態ファイル・ログ・認証情報をVaultへ保存しない
-- 本番R2へ向けたProbeは禁止し、テストバケットと専用キーを使う
+- Do not read or commit populated `config.json`, access keys, passwords, or personal absolute paths.
+- Put placeholders only in `config.example.json`.
+- Do not store iOS state files, logs, or credentials in the Vault.
+- Probing production R2 is forbidden; use a test bucket and a dedicated key.
 
-## iOS版の運用
+## iOS Operations
 
-- 初期版はiOSショートカット → a-Shell `In App` → PythonのPULL専用
-- iOS用の `py/sync.py` と `py/r2sync/` は本PJからiPhone側の実行領域へ一緒にデプロイし、Shortcutsのブックマークで参照する
-- iOSはVault全走査・R2全列挙を行う現行互換モードから開始する
-- 5秒目標は直接ファイル置換完了までで、Obsidianの反映時間とは分けて計測する
+- The initial version is iOS Shortcuts → a-Shell `In App` → Python pull-only.
+- Deploy iOS `py/sync.py` and `py/r2sync/` together from this Project to the execution area on the iPhone, and reference them through a Shortcuts bookmark.
+- Start iOS in the current compatibility mode that scans the entire Vault and enumerates all R2 objects.
+- Measure the five-second target through completion of direct file replacement; measure Obsidian refresh time separately.
