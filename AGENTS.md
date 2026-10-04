@@ -51,9 +51,17 @@ If any item cannot be judged, stop the commit and investigate.
 1. Update `REQUIREMENTS.md` first for requirement changes.
 2. Update `DESIGN.md` for structural changes.
 3. Implement in `src/` or `py/`.
-4. Run `npm test` for the Node.js version.
+4. Run `npm test` for both Node.js and Python.
 5. Generate a bundle with `npm run build` only when distribution is required.
 6. Before publication, check for personal information, secrets, environment-specific paths, and uncurated logs.
+
+Read `REQUIREMENTS.md`, then `DESIGN.md`, then the applicable `DESIGN_NODE.md` or `DESIGN_PYTHON.md`. Run `git diff --check` and inspect the staged diff for configuration, sync-state, and secrets. Before committing, run `node tools/check-public-staged.mjs` as the public-content check.
+
+## Sync and delivery boundaries
+
+- Dry-run is the default: `npm run sync` previews changes. `--apply` permits state changes; `--allow-delete` permits delete propagation.
+- `npm run sync:apply` changes local and external state; `npm run sync:full` also propagates deletion. Review the dry-run, deletion candidates, and changes on both sides before applying a sync plan.
+- Production bucket writes/deletes, pushes, PRs, merges, and releases are separate approval points. A verified local commit does not authorize any of them.
 
 ## Security
 
