@@ -18,6 +18,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期す
 - PUT時は元のmtimeをS3 custom metadataの`mtime`へepoch秒で保存し、PULL時にローカルmtimeを復元する。
 - checkpoint entryは`localMtimeMs`、`localSize`、`remoteETag`、`localContentHash`を基本とする。クライアント間でcheckpointファイル自体は共有しない。
 - 空フォルダは同期しない。
+- 3-way mergeで解決できない両側変更は、元パスをローカル内容とし、remote内容を`<stem> (conflict remote YYYY-MM-DD HHmmss).<ext>`の衝突コピーとして保存・同期する。命名規則はNode/Pythonで共通にする。
 
 ## 共有する安全原則
 

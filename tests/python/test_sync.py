@@ -1,4 +1,7 @@
+from datetime import datetime
+
 from support import *
+from r2sync.planner import conflict_copy_path
 
 
 class SyncWorkflowTests(unittest.TestCase):
@@ -409,24 +412,91 @@ class SyncWorkflowTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), expected)
             self.assertEqual(remote.objects["note.md"].data, expected.encode())
 
-    def test_full_sync_merge_conflict_leaves_conflicting_path_unmodified(self):
-        with tempfile.TemporaryDirectory() as root:
-            vault = Path(root) / "vault"
-            state = Path(root) / "state.json"
-            vault.mkdir()
-            target = vault / "note.md"
-            target.write_text("base\n", encoding="utf-8")
-            remote = FakeRemote({})
-            self.assertTrue(execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), apply=True, push=True)["ok"])
+    def _sync(self, vault, state, remote, **options):
+        options = {"apply": True, "push": True, "merge": True, **options}
+        return execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), **options)
 
-            target.write_text("local\n", encoding="utf-8")
-            remote.objects["note.md"] = RemoteObject(b"remote\n", "remote-new", {})
-            before_remote = remote.objects["note.md"].data
-            result = execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), apply=True, push=True, merge=True)
+    def _diverge(self, root, local_after=b"local\n", remote_after=b"remote\n", base=b"base\n", **options):
+        vault = Path(root) / "vault"
+        state = Path(root) / "state.json"
+        vault.mkdir()
+        target = vault / "note.md"
+        target.write_bytes(base)
+        remote = FakeRemote({})
+        self.assertTrue(self._sync(vault, state, remote, merge=False, **options)["ok"])
+        target.write_bytes(local_after)
+        remote.objects["note.md"] = RemoteObject(remote_after, "remote-new", {"mtime": "1700000000"})
+        return vault, state, target, remote
+
+    def test_full_sync_merge_conflict_creates_remote_conflict_copy(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root)
+            copy_path = conflict_copy_path("note.md", 1_700_000_000_000)
+            result = self._sync(vault, state, remote)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"CONFLICT_COPY": 1})
+            self.assertEqual(target.read_bytes(), b"local\n")
+            self.assertEqual((vault / copy_path).read_bytes(), b"remote\n")
+            self.assertEqual(remote.objects["note.md"].data, b"local\n")
+            self.assertEqual(remote.objects[copy_path].data, b"remote\n")
+            self.assertEqual(set(load_state(state)), {"note.md", copy_path})
+
+            again = self._sync(vault, state, remote)
+            self.assertTrue(again["ok"], again)
+            self.assertEqual(again["planned"], 0)
+
+    def test_conflict_copy_name_keeps_extension_and_is_unique(self):
+        stamp = datetime.fromtimestamp(1_700_000_000).strftime("%Y-%m-%d %H%M%S")
+        self.assertEqual(conflict_copy_path("dir/note.md", 1_700_000_000_000), f"dir/note (conflict remote {stamp}).md")
+        self.assertEqual(conflict_copy_path(".gitignore", 1_700_000_000_000, 2), f".gitignore (conflict remote {stamp}-2)")
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root)
+            first = conflict_copy_path("note.md", 1_700_000_000_000)
+            (vault / first).write_bytes(b"existing")
+            remote.objects[first] = RemoteObject(b"existing", "existing", {})
+            result = self._sync(vault, state, remote)
+            self.assertTrue(result["ok"], result)
+            second = conflict_copy_path("note.md", 1_700_000_000_000, 2)
+            self.assertEqual((vault / second).read_bytes(), b"remote\n")
+            self.assertEqual((vault / first).read_bytes(), b"existing")
+
+    def test_binary_and_missing_base_conflicts_use_conflict_copy(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root, b"\xff\x00local", b"\xff\x00remote", b"\xff\x00base")
+            result = self._sync(vault, state, remote)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"CONFLICT_COPY": 1})
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root, text_merge_base_max_bytes=0)
+            result = self._sync(vault, state, remote, text_merge_base_max_bytes=0)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"CONFLICT_COPY": 1})
+
+    def test_conflict_copy_dry_run_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root)
+            before_state = state.read_bytes()
+            result = self._sync(vault, state, remote, apply=False)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["plannedByType"], {"CONFLICT_COPY": 1})
+            self.assertEqual(sorted(p.name for p in vault.iterdir()), ["note.md"])
+            self.assertEqual(remote.objects["note.md"].data, b"remote\n")
+            self.assertEqual(state.read_bytes(), before_state)
+
+    def test_conflict_copy_falls_back_to_skip_when_ignored_or_push_disabled(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root)
+            result = self._sync(vault, state, remote, extra_patterns=["*(conflict remote*"])
             self.assertFalse(result["ok"])
-            self.assertTrue(result["conflicts"])
-            self.assertEqual(target.read_text(encoding="utf-8"), "local\n")
-            self.assertEqual(remote.objects["note.md"].data, before_remote)
+            self.assertIn("conflict copy path is ignored", result["conflicts"][0]["reason"])
+            self.assertEqual(sorted(p.name for p in vault.iterdir()), ["note.md"])
+            self.assertEqual(remote.objects["note.md"].data, b"remote\n")
+        with tempfile.TemporaryDirectory() as root:
+            vault, state, target, remote = self._diverge(root)
+            result = self._sync(vault, state, remote, push=False)
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["conflicts"], [{"path": "note.md", "reason": "three-way merge conflict"}])
+            self.assertEqual(target.read_bytes(), b"local\n")
 
     def test_full_sync_applies_non_conflicting_paths_around_merge_conflict(self):
         with tempfile.TemporaryDirectory() as root:
@@ -441,9 +511,9 @@ class SyncWorkflowTests(unittest.TestCase):
                 PlainContent(), apply=True, push=True,
             )["ok"])
 
-            home.write_text("local\n", encoding="utf-8")
+            home.write_bytes(b"local\n")
             (vault / "push.md").write_text("push\n", encoding="utf-8")
-            remote.objects["home.md"] = RemoteObject(b"remote\n", "remote-new", {})
+            remote.objects["home.md"] = RemoteObject(b"remote\n", "remote-new", {"mtime": "1700000000"})
             remote.objects["pull.md"] = RemoteObject(b"pull\n", "pull-new", {})
 
             result = execute_full_sync(
@@ -452,18 +522,18 @@ class SyncWorkflowTests(unittest.TestCase):
                 apply_concurrency=2, recheck_remote_before_apply=False,
             )
 
-            self.assertFalse(result["ok"], result)
-            self.assertEqual(result["plannedByType"], {"PUSH": 1, "PULL": 1})
-            self.assertEqual(result["appliedByType"], {"PUSH": 1, "PULL": 1})
-            self.assertEqual(result["applied"], 2)
-            self.assertEqual(result["conflicts"], [{
-                "path": "home.md", "reason": "three-way merge conflict"
-            }])
-            self.assertEqual(home.read_text(encoding="utf-8"), "local\n")
-            self.assertEqual(remote.objects["home.md"].data, b"remote\n")
+            copy_path = conflict_copy_path("home.md", 1_700_000_000_000)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["plannedByType"], {"PUSH": 1, "PULL": 1, "CONFLICT_COPY": 1})
+            self.assertEqual(result["appliedByType"], {"PUSH": 1, "PULL": 1, "CONFLICT_COPY": 1})
+            self.assertEqual(result["applied"], 3)
+            self.assertEqual(result["conflicts"], [])
+            self.assertEqual(home.read_bytes(), b"local\n")
+            self.assertEqual(remote.objects["home.md"].data, b"local\n")
+            self.assertEqual((vault / copy_path).read_bytes(), b"remote\n")
             self.assertEqual(remote.objects["push.md"].data, (vault / "push.md").read_bytes())
             self.assertEqual((vault / "pull.md").read_bytes(), b"pull\n")
-            self.assertEqual(set(load_state(state)), {"home.md", "push.md", "pull.md"})
+            self.assertEqual(set(load_state(state)), {"home.md", "push.md", "pull.md", copy_path})
 
     def test_unscoped_remote_list_conflict_still_aborts_all_mutations(self):
         with tempfile.TemporaryDirectory() as root:

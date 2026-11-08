@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import difflib
+import posixpath
 
 
 def _diff_hunks(base_lines: list[str], variant_lines: list[str]) -> list[dict]:
@@ -89,6 +91,15 @@ def three_way_merge(base: bytes, local: bytes, remote: bytes) -> tuple[bytes | N
         cursor = end
     output.extend(base_lines[cursor:])
     return "".join(output).encode("utf-8"), False
+def conflict_copy_path(rel_path: str, remote_mtime_ms: float, attempt: int = 1) -> str:
+    """Return the shared Node/Python name for a remote-side conflict copy."""
+    directory, _, name = rel_path.rpartition("/")
+    stem, ext = posixpath.splitext(name)
+    stamp = datetime.fromtimestamp(remote_mtime_ms / 1000).strftime("%Y-%m-%d %H%M%S")
+    suffix = f"-{attempt}" if attempt > 1 else ""
+    return f"{directory + '/' if directory else ''}{stem} (conflict remote {stamp}{suffix}){ext}"
+
+
 def _action_counts(actions: list[dict]) -> dict[str, int]:
     counts = {}
     for action in actions:

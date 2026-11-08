@@ -40,5 +40,9 @@ Remotely Saveの設定値はObsidianの`設定 → Remotely Save`から確認す
 | `FORGET` | 両側から消えたパスをstateから削除 |
 | `DELETE_REMOTE` / `DELETE_LOCAL` | リモートまたはローカルから削除 |
 | `SKIPPED_DELETE_REMOTE` / `SKIPPED_DELETE_LOCAL` | 削除が計画されたが`--allow-delete`がないためスキップ |
+| `MERGE` | 両側の重ならない変更を3-way mergeして両側へ反映 |
+| `CONFLICT_COPY` | 3-way mergeできない両側変更。元ファイルはローカル版のまま両側へ反映し、リモート版を衝突コピーとして保存 |
+
+`CONFLICT_COPY`の後は、同じフォルダに`<名前> (conflict remote YYYY-MM-DD HHmmss).<拡張子>`ができる。Obsidianで衝突コピーを見ながら元ファイルを必要に応じて修正し、不要になった衝突コピーを削除する。リモート版をそのまま採用する場合は、元ファイルを削除して衝突コピーを元の名前へ変更する。衝突コピーの削除をR2へ反映するには`--allow-delete`付きで同期する。
 
 `SEED`ではなく大量の`PUSH`/`PULL`が不一致理由付きで出る場合は、`password`または`remotePrefix`が誤っている可能性が高い。その場合は`--apply`を実行しない。

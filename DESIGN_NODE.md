@@ -73,7 +73,8 @@ NOOPは集計だけに含め、適用・checkpoint更新・適用進捗から外
 - full modeではPULL候補を先に取得・復号・検証し、ローカル再検査とR2 snapshot再確認を終えてから変更する。PUSHは固定8並列、Vault書込み・MERGE・削除は逐次実行する。
 - `vaultPath`は実体解決後もVault配下であることを確認し、symlink、junction、reparse point経由のVault外アクセスを拒否する。再確認・適用時にも同じ検査を行う。
 - remote filename衝突、無効なremote一覧、またはその他の全体競合は、競合をactionへ変換せず、対象パスまたは全体を適用対象から除外する。
-- apply直前はPUSH/PULL/MERGE/DELETE/FORGET全対象の内容hashまたは不在を再確認する。PUSH batchに失敗があれば成功分だけcheckpointし、後続の非PUSH操作は中止する。
+- 両側変更で3-way mergeが衝突した場合、baseがない場合、UTF-8でない場合は`CONFLICT_COPY`とする。衝突コピーをlocalへatomic writeしてR2へPUT・checkpointした後、元パスのlocal内容をR2へPUTしてcheckpointする。衝突コピー名は計画完了後にパス順で決め、local/remote/state/計画済み名/ディスク上の既存ファイルと重ならない連番を付ける。衝突コピー名が除外対象なら`CONFLICT`として対象パスを除外する。
+- apply直前はPUSH/PULL/MERGE/CONFLICT_COPY/DELETE/FORGET全対象の内容hashまたは不在を再確認する。CONFLICT_COPYは衝突コピー先の不在も確認する。PUSH batchに失敗があれば成功分だけcheckpointし、後続の非PUSH操作は中止する。
 - Probeは既存targetのlocal snapshot、設定・state・state tempの保護対象判定を行い、保護対象または競合targetを変更しない。
 - 新`statePath`がない状態で旧`.sync-state.json`だけを検出した場合は、旧stateを自動採用せず、移行手順を示してR2接続前に停止する。
 

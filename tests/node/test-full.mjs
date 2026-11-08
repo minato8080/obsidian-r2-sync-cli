@@ -9,7 +9,7 @@ import { createCipher } from "../../src/crypto.js";
 import { createIgnoreMatcher } from "../../src/ignore.js";
 import { executeProbe } from "../../src/probe.js";
 import { loadState, saveState } from "../../src/state.js";
-import { executeFullSync } from "../../src/sync.js";
+import { conflictCopyPath, executeFullSync } from "../../src/sync.js";
 import { listLocalFiles, reconcileLocalFiles } from "../../src/localFiles.js";
 
 const cipher = await createCipher("", "plain");
@@ -84,6 +84,80 @@ async function run() {
       assert.ok(result.errors.some((item) => item.relPath === "local.md"));
       await assert.rejects(() => fs.access(path.join(vault, "remote.md")));
     } finally { await fs.rm(root, { recursive: true, force: true }); }
+  }
+
+  {
+    const remoteMs = 1_700_000_000_000, date = new Date(remoteMs), pad = (value) => String(value).padStart(2, "0");
+    const stamp = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+    assert.equal(conflictCopyPath("dir/note.md", remoteMs), `dir/note (conflict remote ${stamp}).md`);
+    assert.equal(conflictCopyPath(".gitignore", remoteMs, 2), `.gitignore (conflict remote ${stamp}-2)`);
+
+    const diverge = async (prefix, { local = "local\n", remote = "remote\n", base = "base\n", extraPatterns = [], textMergeBaseMaxBytes } = {}) => {
+      const dirs = await makeRoot(prefix);
+      const target = path.join(dirs.vault, "note.md");
+      await fs.writeFile(target, base);
+      const objects = new Map(), api = remoteApi(objects), ignoreMatcher = createIgnoreMatcher(extraPatterns);
+      const sync = (apply = true) => executeFullSync({ vaultPath: dirs.vault, statePath: dirs.state, ...api, cipher, apply, allowDelete: false, listLocalFiles, loadState, saveState, ignoreMatcher, textMergeBaseMaxBytes });
+      assert.equal((await sync()).ok, true);
+      await fs.writeFile(target, local);
+      objects.set("note.md", { bytes: Buffer.from(remote), metadata: { mtime: String(remoteMs / 1000) }, etag: "remote-new" });
+      return { ...dirs, target, objects, sync };
+    };
+    const copy = conflictCopyPath("note.md", remoteMs);
+
+    const merged = await diverge("r2-sync-full-conflict-copy-");
+    try {
+      const result = await merged.sync();
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(result.appliedByType, { CONFLICT_COPY: 1 });
+      assert.equal(await fs.readFile(merged.target, "utf8"), "local\n");
+      assert.equal(await fs.readFile(path.join(merged.vault, copy), "utf8"), "remote\n");
+      assert.equal(merged.objects.get("note.md").bytes.toString(), "local\n");
+      assert.equal(merged.objects.get(copy).bytes.toString(), "remote\n");
+      assert.deepEqual(Object.keys(await loadState(merged.state)).sort(), [copy, "note.md"].sort());
+      const again = await merged.sync();
+      assert.equal(again.ok, true);
+      assert.equal(again.planned, 0);
+    } finally { await fs.rm(merged.root, { recursive: true, force: true }); }
+
+    const numbered = await diverge("r2-sync-full-conflict-number-");
+    try {
+      await fs.writeFile(path.join(numbered.vault, copy), "existing");
+      const result = await numbered.sync();
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(await fs.readFile(path.join(numbered.vault, conflictCopyPath("note.md", remoteMs, 2)), "utf8"), "remote\n");
+      assert.equal(await fs.readFile(path.join(numbered.vault, copy), "utf8"), "existing");
+    } finally { await fs.rm(numbered.root, { recursive: true, force: true }); }
+
+    const bin = (text) => Buffer.concat([Buffer.from([0xff, 0x00]), Buffer.from(text)]);
+    for (const options of [{ local: bin("local"), remote: bin("remote"), base: bin("base") }, { textMergeBaseMaxBytes: 0 }]) {
+      const unmergeable = await diverge("r2-sync-full-conflict-unmergeable-", options);
+      try {
+        const result = await unmergeable.sync();
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.deepEqual(result.appliedByType, { CONFLICT_COPY: 1 });
+        assert.deepEqual(await fs.readFile(path.join(unmergeable.vault, copy)), Buffer.from(options.remote ?? "remote\n"));
+      } finally { await fs.rm(unmergeable.root, { recursive: true, force: true }); }
+    }
+
+    const dryRun = await diverge("r2-sync-full-conflict-dry-");
+    try {
+      const before = await fs.readFile(dryRun.state);
+      const result = await dryRun.sync(false);
+      assert.deepEqual(result.plannedByType, { CONFLICT_COPY: 1 });
+      assert.deepEqual(await fs.readdir(dryRun.vault), ["note.md"]);
+      assert.equal(dryRun.objects.get("note.md").bytes.toString(), "remote\n");
+      assert.deepEqual(await fs.readFile(dryRun.state), before);
+    } finally { await fs.rm(dryRun.root, { recursive: true, force: true }); }
+
+    const ignored = await diverge("r2-sync-full-conflict-ignored-", { extraPatterns: ["*(conflict remote*"] });
+    try {
+      const result = await ignored.sync();
+      assert.equal(result.ok, false);
+      assert.match(result.conflicts[0].reason, /conflict copy path is ignored/);
+      assert.deepEqual(await fs.readdir(ignored.vault), ["note.md"]);
+      assert.equal(ignored.objects.get("note.md").bytes.toString(), "remote\n");
+    } finally { await fs.rm(ignored.root, { recursive: true, force: true }); }
   }
 
   {

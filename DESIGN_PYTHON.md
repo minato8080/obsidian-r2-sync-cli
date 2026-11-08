@@ -80,7 +80,7 @@ entryは共有fieldに加え、3-way merge用の`baseContentBase64`を持てる�
 
 ## 同期計画
 
-基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしはconflictとして対象パスをactionから除外する。他パスのactionは適用し、最終結果は未解決競合を示す`ok=false`とする。
+基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしは`CONFLICT_COPY`とする。`CONFLICT_COPY`はremote内容を衝突コピー名で保存し、元パスはローカル内容を正としてPUSHする。衝突コピー名が除外対象の場合とPUSH無効時だけconflictとして対象パスをactionから除外する。他パスのactionは適用し、未解決競合がある場合の最終結果は`ok=false`とする。
 
 計画処理は次の段階に分ける。
 
@@ -103,6 +103,7 @@ NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoi
 - PUSHはbatch内の全future確定後、成功分を1回のcheckpointへ保存する。一部失敗時も成功分を保存し、以降の非PUSH操作は行わない。強制終了でbatch checkpoint前に停止した場合は、次回実行でremoteとの差分を再評価する。
 - DELETE_REMOTEはR2成功後、PULL/DELETE_LOCALはlocal成功後にcheckpointする。
 - MERGEはlocalをatomic replaceしてからR2へPUTする。PUT失敗時はcheckpointせず、次回に変更済みlocalを再計画する。
+- CONFLICT_COPYは、衝突コピーをlocalへatomic writeし、R2へPUTしてcheckpointしてから、元パスのlocal内容をR2へPUTしてcheckpointする。途中失敗時は衝突コピーだけが残り、次回は元パスを再計画する。適用前検証では元パスの内容hashと衝突コピー先の不在を確認する。
 - delete actionは計画されても`--allow-delete`なしではskipし、対象を変更しない。
 - 適用途中の失敗では、それ以前に成功した操作、または成功したPUSH batchのcheckpointを保持して再開可能にする。
 - `recheckRemoteBeforeApply=false`の明示時だけremote snapshot再確認を省略し、stderr警告と結果flagへ記録する。
