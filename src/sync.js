@@ -25,6 +25,26 @@ async function localSnapshotHash(root, relPath) {
 }
 function remoteKey(prefix, cipher, relPath) { return prefix + cipher.encryptPath(relPath); }
 
+export function conflictCopyPath(relPath, remoteMs, attempt = 1) {
+  const slash = relPath.lastIndexOf("/");
+  const dir = relPath.slice(0, slash + 1), name = relPath.slice(slash + 1);
+  const ext = path.posix.extname(name), stem = name.slice(0, name.length - ext.length);
+  const date = new Date(remoteMs), pad = (value) => String(value).padStart(2, "0");
+  const stamp = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `${dir}${stem} (conflict remote ${stamp}${attempt > 1 ? `-${attempt}` : ""})${ext}`;
+}
+
+async function assignConflictCopyPaths(actions, { root, localFiles, remoteByPath, prevEntries, ignoreMatcher }) {
+  const taken = new Set([...localFiles.keys(), ...remoteByPath.keys(), ...Object.keys(prevEntries)]);
+  const exists = async (relPath) => { try { await fs.lstat(vaultPath(root, relPath)); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } };
+  for (const action of actions.filter(({ type }) => type === "CONFLICT_COPY").sort((a, b) => (a.relPath < b.relPath ? -1 : 1))) {
+    let attempt = 1, copyPath = conflictCopyPath(action.relPath, action.remoteMtimeMs);
+    while (taken.has(copyPath) || await exists(copyPath)) copyPath = conflictCopyPath(action.relPath, action.remoteMtimeMs, ++attempt);
+    if (ignoreMatcher?.isIgnoredFile(copyPath)) { Object.assign(action, { type: "CONFLICT", reason: `${action.conflictReason}; conflict copy path is ignored` }); continue; }
+    taken.add(copyPath); action.copyPath = copyPath; action.reason = `${action.conflictReason}: remote版を${copyPath}へ保存`;
+  }
+}
+
 export function threeWayMerge(base, local, remote) {
   const split = (bytes) => new TextDecoder("utf-8", { fatal: true }).decode(bytes).split(/(?<=\n)/);
   let baseLines, localLines, remoteLines;
@@ -119,15 +139,13 @@ export async function planSync({ vaultPath: root, localFiles, remoteItems, remot
     const remoteMs = remoteMtime(remote.metadata, candidate.rem);
     if (candidate.type === "BOTH_CHANGED" && merge) {
       const base = baseBytes(candidate.prev);
-      if (!base) actions.push({ type: "CONFLICT", relPath: candidate.relPath, reason: "merge base is unavailable in checkpoint state" });
-      else {
-        const merged = threeWayMerge(base, localBytes, remoteBytes);
-        if (merged.conflict) actions.push({ type: "CONFLICT", relPath: candidate.relPath, reason: "three-way merge conflict" });
-        else actions.push({ type: "MERGE", relPath: candidate.relPath, data: merged.data, remoteKey: candidate.rem.key, remoteEtag: candidate.rem.etag, localMtimeMs: Math.max(candidate.loc.mtimeMs, remoteMs), localSnapshotHash: hash(localBytes), remoteBytes });
-      }
+      const merged = base ? threeWayMerge(base, localBytes, remoteBytes) : null;
+      if (merged && !merged.conflict) actions.push({ type: "MERGE", relPath: candidate.relPath, data: merged.data, remoteKey: candidate.rem.key, remoteEtag: candidate.rem.etag, localMtimeMs: Math.max(candidate.loc.mtimeMs, remoteMs), localSnapshotHash: hash(localBytes), remoteBytes });
+      else actions.push({ type: "CONFLICT_COPY", relPath: candidate.relPath, conflictReason: base ? "three-way merge conflict" : "merge base is unavailable in checkpoint state", remoteKey: candidate.rem.key, remoteEtag: candidate.rem.etag, remoteBytes, remoteMtimeMs: remoteMs, localSnapshotHash: hash(localBytes) });
     } else if (candidate.type === "BOTH_CHANGED") actions.push(candidate.loc.mtimeMs > remoteMs ? { type: "PUSH", relPath: candidate.relPath, localSnapshotHash: hash(localBytes), reason: "両側変更・ローカルの方が新しいため上書き" } : { type: "PULL", relPath: candidate.relPath, localSnapshotHash: hash(localBytes), remoteKey: candidate.rem.key, remoteEtag: candidate.rem.etag, data: remoteBytes, mtimeMs: remoteMs, reason: "両側変更・リモートの方が新しいため上書き" });
     else actions.push({ type: "PULL", relPath: candidate.relPath, localSnapshotHash: hash(localBytes), remoteKey: candidate.rem.key, remoteEtag: candidate.rem.etag, data: remoteBytes, mtimeMs: remoteMs });
   });
+  await assignConflictCopyPaths(actions, { root, localFiles, remoteByPath, prevEntries, ignoreMatcher });
   return actions;
 }
 
@@ -149,6 +167,10 @@ async function verifyLocalSnapshots(actions, root) {
       } else if (action.localSnapshotHash !== undefined) {
         const current = hash(await fs.readFile(target));
         if (current !== action.localSnapshotHash) conflicts.push({ path: action.relPath, reason: "local file changed during planning" });
+      }
+      if (action.copyPath) {
+        try { await fs.lstat(await assertVaultPath(root, action.copyPath)); conflicts.push({ path: action.relPath, reason: `conflict copy target appeared during planning: ${action.copyPath}` }); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
       }
       if (!conflicts.some((item) => item.path === action.relPath)) retained.push(action);
     } catch (error) {
@@ -176,6 +198,20 @@ export async function applyActions({ actions, vaultPath: root, localFiles, prevE
       const target = await assertVaultPath(root, action.relPath);
        if (action.type === "PULL") { const remote = action.data ? null : await r2.getObject(action.remoteKey); const bytes = action.data ? Buffer.from(action.data) : Buffer.from(await cipher.decryptContent(remote.bytes)); await atomicReplace(target, bytes, action.mtimeMs ?? remoteMtime(remote.metadata)); await checkpoint(action.relPath, action.remoteEtag ?? remote?.etag, bytes); bump("PULL"); }
       else if (action.type === "MERGE") { await atomicReplace(target, action.data, action.localMtimeMs); const encrypted = await cipher.encryptContent(action.data); const started = performance.now(); const result = await r2.putObject(action.remoteKey, encrypted, { mtime: String(action.localMtimeMs / 1000) }); timings.remote += performance.now() - started; await checkpoint(action.relPath, result.etag, action.data); bump("MERGE"); }
+      else if (action.type === "CONFLICT_COPY") {
+        const copyTarget = await assertVaultPath(root, action.copyPath);
+        await atomicReplace(copyTarget, action.remoteBytes, action.remoteMtimeMs);
+        let started = performance.now();
+        const copyResult = await r2.putObject(r2Prefix + await cipher.encryptPath(action.copyPath), await cipher.encryptContent(action.remoteBytes), { mtime: String(action.remoteMtimeMs / 1000) });
+        timings.remote += performance.now() - started;
+        await checkpoint(action.copyPath, copyResult.etag, action.remoteBytes);
+        const bytes = await fs.readFile(target), stat = await fs.stat(target);
+        if (hash(bytes) !== action.localSnapshotHash) throw new Error("local file changed during planning");
+        started = performance.now();
+        const result = await r2.putObject(action.remoteKey, await cipher.encryptContent(bytes), { mtime: String(stat.mtimeMs / 1000) });
+        timings.remote += performance.now() - started;
+        await checkpoint(action.relPath, result.etag, bytes); bump("CONFLICT_COPY");
+      }
       else if (action.type === "DELETE_REMOTE") { if (allowDelete) { const started = performance.now(); await r2.deleteObject(action.remoteKey); timings.remote += performance.now() - started; delete newEntries[action.relPath]; bump("DELETE_REMOTE"); if (onCheckpoint) { const checkpointStarted = performance.now(); await onCheckpoint(newEntries); timings.checkpoint += performance.now() - checkpointStarted; } } else bump("SKIPPED_DELETE_REMOTE"); }
       else if (action.type === "DELETE_LOCAL") { if (allowDelete) { await fs.rm(target); delete newEntries[action.relPath]; bump("DELETE_LOCAL"); if (onCheckpoint) { const checkpointStarted = performance.now(); await onCheckpoint(newEntries); timings.checkpoint += performance.now() - checkpointStarted; } } else bump("SKIPPED_DELETE_LOCAL"); }
       else if (action.type === "FORGET") { delete newEntries[action.relPath]; bump("FORGET"); if (onCheckpoint) { const checkpointStarted = performance.now(); await onCheckpoint(newEntries); timings.checkpoint += performance.now() - checkpointStarted; } }

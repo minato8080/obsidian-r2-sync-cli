@@ -113,7 +113,7 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - 最終JSONの`ignoredRemoteObjects`は、除外ルールへ正常一致した`reason: "ignored"`の個別オブジェクトを省略し、総数と省略数を別フィールドで返す。パス復号不能など調査可能な詳細だけを最大20件保持する。人向け最終結果には除外remote objectの総数を1行で表示する
 - `NOOP`は変更なし件数として表示するだけで、適用計画・適用前再検証・checkpoint更新・適用進捗には含めない。全件`NOOP`の実行結果は`planned=0`かつ`applied=0`とする
 - `SEED`は外部データを変更しないため、複数件のstate更新を一括保存する。PUSHは並列batchの成功分をまとめて1回保存し、一部失敗時も成功分を保存してから以降の非PUSH操作を中止する。PULL・削除・mergeは成功ごとのcheckpointを維持する
-- `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず競合停止する。未指定時は互換のため従来どおり全内容を保存する
+- `textMergeBaseMaxBytes`は任意の非負整数とし、指定時はUTF-8テキストかつ指定バイト数以下の内容だけを3-way merge用baseとしてstateへ保存する。対象外ファイルが両側変更された場合は自動上書きせず、衝突コピーで解決する。未指定時は互換のため従来どおり全内容を保存する
 - `recheckRemoteBeforeApply`は真偽値とし、既定値は`true`とする。明示的に`false`を指定した場合だけ適用直前のR2再一覧を省略し、警告と結果JSONのフラグで安全確認を省略したことを示す
 - Python版の並列取得中にCtrl+Cを受けた場合は、未開始タスクを取り消してworker待機をせず終了する。取得・検証段階ではVault、R2、stateを変更しない
 - Python版の並列PUSH中にCtrl+Cを受けた場合は未開始PUTを取り消し、開始済みPUTの終了を待ってから終了コード130で停止する。batch checkpoint前に停止した成功PUTは次回実行で再評価する
@@ -123,8 +123,27 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
 - `prefer-nfc`で同期対象外にしたUnicode aliasの総数を`unicodeAliasesIgnored`として進捗と結果JSONへ表示する。明示設定はaliasの削除や内容統合を行わない
 - Python版はR2一覧の復号後、ローカル走査に存在しない同期対象パスをVault上で直接再解決する。Files Providerの遅延列挙やUnicode表現差により既存ファイルを発見した場合はローカル走査結果へ補完し、新規PULLではなく既存ファイルとして内容比較する。補完件数を進捗と結果JSONへ表示する
 - Node版は互換性のため固定8並列を維持し、`fetchConcurrency`、`applyConcurrency`、`requestTimeoutSeconds`は設定形式互換のため受理するが実行時には使用しない
-- stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする。baseがない旧stateやバイナリの衝突は自動解決せず、そのパスだけをskipして他の非競合パスを適用する
+- stateに保存した前回共通内容をbaseとしてUTF-8テキストを3-way mergeする
+- 両側変更で3-way mergeが重複変更により衝突した場合、baseがない旧stateの場合、バイナリなどUTF-8でない場合は、衝突コピーで解決する。どちらの内容も失わない
+  - 元パスはローカル内容のまま変更せず、R2の元パスへローカル内容をPUSHし、baseをローカル内容で更新する
+  - remote内容は同じフォルダの`<stem> (conflict remote YYYY-MM-DD HHmmss).<ext>`へ保存し、通常の新規ファイルとしてR2へPUSHする。日時はremote版mtimeの実行端末ローカル時刻とし、拡張子は元ファイルのものを末尾に維持する。拡張子のないファイルやドットファイルは名前の末尾へ付ける
+  - 衝突コピー名がローカル、R2、state、計画中の別衝突コピーのいずれかと重なる場合は` 153000-2`のように連番を付ける。衝突コピー名が除外ルールに一致する場合は自動解決せず、従来どおりそのパスだけを競合としてskipする
+  - 解決後の元パスは次回以降NOOPになる。利用者は衝突コピーを見て元ファイルを手で修正し、不要になった衝突コピーを削除する。衝突コピー削除のR2反映は通常の削除と同じく`--allow-delete`を必要とする
+  - 衝突コピー解決は`--apply`時だけ実行し、dry-runでは`CONFLICT_COPY`として計画表示する。適用前のローカル内容hash再確認とR2 snapshot再確認の対象に含め、衝突コピー先が計画後に出現した場合は競合として停止する
+  - Python版はPUSHが無効な設定では衝突コピー解決を行わず、従来どおり競合としてskipする
 - `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
+
+### Python版の自己更新
+
+- Python版は`__version__`でセマンティックバージョン`X.Y.Z`を持ち、`--version`で表示できる
+- `--self-update`を明示した時だけ、GitHub Releasesの最新リリースから`sync.py`と`r2sync/`を取得して自分自身を置き換える。通常の同期実行では更新確認も通信も行わない。`--self-update`は同期を行わず、`--config`を必要としない
+- `--self-update --check`は新版の有無だけを返し、ファイルを変更しない。現在版以上のリリースしかない場合は何もしない
+- 配布元の既定は本リポジトリとし、`--update-repo <owner>/<name>`で別リポジトリを指定できる。GitHubへの認証は使わない
+- 配布物はリリース添付の`r2sync-python-vX.Y.Z.zip`と`SHA256SUMS`とする。zipのSHA-256が一致し、中身が`sync.py`と`r2sync/*.py`だけで、内部の`__version__`がタグと一致し、全ファイルが構文チェックを通った場合だけ置き換える
+- 置き換えは同じディレクトリ内の一時ディレクトリへ展開してから行い、直前の版を`.r2sync-backup/`へ1世代残す。置き換え途中に失敗した場合は元の版へ戻す
+- 実行中のスクリプトがGitの作業ツリー内にある場合は、開発用checkoutを壊さないよう自己更新を拒否する
+- 結果は同期と同じく標準出力のJSON、進捗は標準エラーへ出す
+- リリースは`vX.Y.Z`タグのpushを契機にGitHub Actionsでテスト、タグと`__version__`の一致確認、配布物作成、リリース作成を行う。タグのpushとリリース作成は都度承認が必要な操作とする
 
 ## 関連
 

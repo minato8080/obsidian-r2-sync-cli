@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from . import PullError
+from . import PullError, __version__
 from .config import _config_relative_path, _load_config
 from .crypto import PlainContent, RcloneBase64
 from .executor import execute_full_sync, execute_probe
@@ -22,6 +22,7 @@ from .local import (
     _vault_path,
 )
 from .remote import R2Client
+from .selfupdate import DEFAULT_REPOSITORY, self_update
 
 
 REMOTE_OBJECT_DETAIL_LIMIT = 20
@@ -82,7 +83,8 @@ def _result_for_json(result: dict) -> dict:
     return output
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="r2-sync iOS sync")
-    parser.add_argument("--config", required=True, help="path to the JSON config")
+    parser.add_argument("--version", action="version", version=f"r2-sync {__version__}")
+    parser.add_argument("--config", help="path to the JSON config (required except for --self-update)")
     parser.add_argument("--apply", action="store_true", help="replace vault files and checkpoint state")
     parser.add_argument("--allow-delete", action="store_true", help="allow planned remote/local deletions in full mode")
     parser.add_argument(
@@ -90,8 +92,25 @@ def main(argv: list[str] | None = None) -> int:
         help="check ignored vault-relative paths locally; omit PATH to list ignored vault entries",
     )
     parser.add_argument("--verbose", action="store_true", help="show every path in --check-ignore mode")
+    parser.add_argument("--self-update", action="store_true", help="replace sync.py and r2sync/ with the latest GitHub release")
+    parser.add_argument("--check", action="store_true", help="with --self-update, only report whether an update exists")
+    parser.add_argument("--update-repo", default=DEFAULT_REPOSITORY, metavar="OWNER/NAME", help="GitHub repository used by --self-update")
     args = parser.parse_args(argv)
     progress = lambda message: print(message, file=sys.stderr, flush=True)
+    if args.self_update:
+        if args.apply or args.allow_delete or args.check_ignore is not None:
+            parser.error("--self-update cannot be combined with sync options")
+        try:
+            result = self_update(args.update_repo, check_only=args.check, progress=progress)
+        except (PullError, OSError) as error:
+            result = {"ok": False, "mode": "self-update-check" if args.check else "self-update", "repository": args.update_repo, "currentVersion": __version__, "updated": False, "errors": [{"error": str(error)}]}
+            progress(f"エラー: {error}")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["ok"] else 1
+    if args.check or args.update_repo != DEFAULT_REPOSITORY:
+        parser.error("--check and --update-repo require --self-update")
+    if not args.config:
+        parser.error("--config is required")
     run_lock = None
     try:
         config_path = Path(args.config).expanduser().resolve()

@@ -256,11 +256,14 @@ class LocalAndCheckpointTests(unittest.TestCase):
                     vault, state, remote.list, remote.get, remote.put, remote.delete,
                     PlainContent(), apply=True, push=True, merge=True, text_merge_base_max_bytes=4,
                 )
-                self.assertFalse(conflict["ok"], conflict)
-                self.assertEqual(conflict["applied"], 0)
-                self.assertTrue(any("merge base is unavailable" in item["reason"] for item in conflict["conflicts"]))
+                # A path without a retained base is resolved by a conflict copy, not overwritten.
+                self.assertTrue(conflict["ok"], conflict)
+                self.assertEqual(conflict["appliedByType"], {"CONFLICT_COPY": 1})
                 self.assertEqual((vault / "large.txt").read_bytes(), b"local-change")
-                self.assertEqual(remote.objects["large.txt"].data, b"remote-change")
+                self.assertEqual(remote.objects["large.txt"].data, b"local-change")
+                copies = [path for path in vault.iterdir() if path.name.startswith("large (conflict remote ")]
+                self.assertEqual(len(copies), 1)
+                self.assertEqual(copies[0].read_bytes(), b"remote-change")
 
     def test_vault_root_glob_matches_directory_and_descendants(self):
             ignored_dir, ignored_file = _ignore_matcher(["tools/r2-sync/**"])

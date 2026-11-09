@@ -25,7 +25,7 @@ from .local import (
     _vault_path,
     atomic_replace,
 )
-from .planner import _action_counts, classify_sync_path, three_way_merge
+from .planner import _action_counts, classify_sync_path, conflict_copy_path, three_way_merge
 from .remote import (
     _collect_remote_objects,
     _mtime_ms,
@@ -329,12 +329,13 @@ def execute_full_sync(
                 prev = candidate["prev"]
                 if merge:
                     base = _state_base_bytes(prev)
-                    if base is None:
-                        conflicts.append({"path": path_name, "reason": "merge base is unavailable in checkpoint state"})
-                        continue
-                    merged, has_conflict = three_way_merge(base, local_bytes, remote_bytes)
+                    merged, has_conflict = (None, True) if base is None else three_way_merge(base, local_bytes, remote_bytes)
                     if has_conflict or merged is None:
-                        conflicts.append({"path": path_name, "reason": "three-way merge conflict"})
+                        reason = "merge base is unavailable in checkpoint state" if base is None else "three-way merge conflict"
+                        if not push:
+                            conflicts.append({"path": path_name, "reason": reason})
+                            continue
+                        actions.append({"type": "CONFLICT_COPY", "path": path_name, "remote": remote_info, "conflictReason": reason, "remoteBytes": remote_bytes, "remoteMtimeMs": _remote_mtime_ms(remote_object, remote_info), "localBytes": local_bytes, "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest()})
                         continue
                     actions.append({"type": "MERGE", "path": path_name, "remote": remote_info, "data": merged, "localMtimeMs": max(candidate["localMtimeMs"], _remote_mtime_ms(remote_object, remote_info)), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "remoteBytes": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "reason": "両側変更・3-way merge"})
                 elif candidate["localMtimeMs"] > _remote_mtime_ms(remote_object, remote_info) and push:
@@ -345,6 +346,23 @@ def execute_full_sync(
                     actions.append({"type": "PULL", "path": path_name, "remote": remote_info, "hadLocal": True, "data": remote_bytes, "etag": remote_object.etag or remote_info.get("etag"), "mtimeMs": _remote_mtime_ms(remote_object, remote_info), "localSnapshotHash": hashlib.sha256(local_bytes).hexdigest(), "reason": "両側変更・リモートの方が新しいため上書き"})
         except Exception as error:
             errors.append({"path": candidate["path"], "error": str(error)})
+
+    # Names are assigned after all fetches, in path order, so they are stable
+    # and never collide with each other or with anything already known.
+    taken_paths = set(local) | set(remotes) | set(previous)
+    for action in sorted((item for item in actions if item["type"] == "CONFLICT_COPY"), key=lambda item: item["path"]):
+        attempt = 1
+        copy_path = conflict_copy_path(action["path"], action["remoteMtimeMs"])
+        while copy_path in taken_paths or _vault_path(vault, copy_path).exists():
+            attempt += 1
+            copy_path = conflict_copy_path(action["path"], action["remoteMtimeMs"], attempt)
+        if ignored_file(copy_path):
+            actions.remove(action)
+            conflicts.append({"path": action["path"], "reason": f"{action['conflictReason']}; conflict copy path is ignored"})
+            continue
+        taken_paths.add(copy_path)
+        action["copyPath"] = copy_path
+        action["reason"] = f"{action['conflictReason']}: remote版を{copy_path}へ保存"
 
     fetch_validate_ms = round((time.perf_counter() - conflict_check_finished) * 1000, 2)
     unchanged = sum(action["type"] == "NOOP" for action in actions)
@@ -435,7 +453,10 @@ def execute_full_sync(
     for action in applicable_actions:
         path_name = action["path"]
         target = _vault_path(vault, path_name)
-        if action["type"] in ("PUSH", "MERGE", "SEED"):
+        if action["type"] == "CONFLICT_COPY" and _vault_path(vault, action["copyPath"]).exists():
+            result["conflicts"].append({"path": path_name, "reason": f"conflict copy target appeared during planning: {action['copyPath']}"})
+            preflight_conflict_paths.add(path_name)
+        elif action["type"] in ("PUSH", "MERGE", "SEED", "CONFLICT_COPY"):
             expected_hash = action.get("localSnapshotHash") or hashlib.sha256(action.get("localBytes", b"")).hexdigest()
             if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != expected_hash:
                 result["conflicts"].append({"path": path_name, "reason": "local file changed during planning"})
@@ -650,6 +671,24 @@ def execute_full_sync(
                     put, action["remote"]["key"], decoder.encrypt_content(action["data"]), action["localMtimeMs"]
                 )
                 checkpoint(path_name, etag, action["data"])
+                result["applied"] += 1
+                bump(result["appliedByType"], action_type)
+            elif action_type == "CONFLICT_COPY":
+                copy_path = action["copyPath"]
+                atomic_replace(_vault_path(vault, copy_path), action["remoteBytes"], action["remoteMtimeMs"])
+                copy_etag = timed_remote(
+                    put, _remote_key(decoder, remote_prefix, copy_path),
+                    decoder.encrypt_content(action["remoteBytes"]), action["remoteMtimeMs"],
+                )
+                checkpoint(copy_path, copy_etag, action["remoteBytes"])
+                local_bytes = target.read_bytes()
+                if hashlib.sha256(local_bytes).hexdigest() != action["localSnapshotHash"]:
+                    raise PullError("local file changed during planning")
+                etag = timed_remote(
+                    put, action["remote"]["key"], decoder.encrypt_content(local_bytes),
+                    target.stat().st_mtime_ns / 1_000_000,
+                )
+                checkpoint(path_name, etag, local_bytes)
                 result["applied"] += 1
                 bump(result["appliedByType"], action_type)
             elif action_type == "DELETE_REMOTE":

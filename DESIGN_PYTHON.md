@@ -21,13 +21,18 @@ py/
     ├── checkpoint.py       # state読書き、merge base管理
     ├── remote.py           # SigV4 R2 client、remote一覧正規化、並列read
     ├── planner.py          # pureなaction分類と3-way text merge
-    └── executor.py         # Probe/full orchestration、再検証、適用
+    ├── executor.py         # Probe/full orchestration、再検証、適用
+    └── selfupdate.py       # GitHub Releasesからの自己更新
+
+tools/
+└── build_python_release.py # リリース用zipとSHA256SUMSの作成
 
 tests/python/
 ├── support.py
 ├── test_cli.py
 ├── test_crypto.py
 ├── test_local.py
+├── test_selfupdate.py
 └── test_sync.py
 ```
 
@@ -42,6 +47,7 @@ executor → local, checkpoint, remote, planner
 remote → local（path正規化とignore判定）
 checkpoint → local（path正規化）
 planner → 標準ライブラリのみ
+cli → selfupdate → 標準ライブラリのみ
 ```
 
 `planner`はfilesystem、checkpoint、HTTPへ依存させない。`local`と`checkpoint`もR2へ依存させない。共有例外はpackage rootで定義し、下位module間の循環を避ける。
@@ -52,7 +58,7 @@ planner → 標準ライブラリのみ
 
 `mode`は必須とし、`full`または`probe`を指定する。相対`statePath`は設定JSONのdirectoryだけを基準とする。
 
-CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`とする。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
+CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`、`--version`、`--self-update`、`--check`、`--update-repo`とする。`--config`は同期と除外判定で必須とし、`--version`と`--self-update`では不要とする。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
 
 ## 暗号化とR2
 
@@ -80,7 +86,7 @@ entryは共有fieldに加え、3-way merge用の`baseContentBase64`を持てる�
 
 ## 同期計画
 
-基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしはconflictとして対象パスをactionから除外する。他パスのactionは適用し、最終結果は未解決競合を示す`ok=false`とする。
+基本action tableはNode.js版と同じだが、Python full modeは両側変更でmergeが有効なとき、checkpoint baseを使ったUTF-8 line単位3-way mergeを先に試す。非重複変更はMERGE、重複変更、binary、baseなしは`CONFLICT_COPY`とする。`CONFLICT_COPY`はremote内容を衝突コピー名で保存し、元パスはローカル内容を正としてPUSHする。衝突コピー名が除外対象の場合とPUSH無効時だけconflictとして対象パスをactionから除外する。他パスのactionは適用し、未解決競合がある場合の最終結果は`ok=false`とする。
 
 計画処理は次の段階に分ける。
 
@@ -103,6 +109,7 @@ NOOPは`unchanged`だけへ集計し、適用対象、事前再検証、checkpoi
 - PUSHはbatch内の全future確定後、成功分を1回のcheckpointへ保存する。一部失敗時も成功分を保存し、以降の非PUSH操作は行わない。強制終了でbatch checkpoint前に停止した場合は、次回実行でremoteとの差分を再評価する。
 - DELETE_REMOTEはR2成功後、PULL/DELETE_LOCALはlocal成功後にcheckpointする。
 - MERGEはlocalをatomic replaceしてからR2へPUTする。PUT失敗時はcheckpointせず、次回に変更済みlocalを再計画する。
+- CONFLICT_COPYは、衝突コピーをlocalへatomic writeし、R2へPUTしてcheckpointしてから、元パスのlocal内容をR2へPUTしてcheckpointする。途中失敗時は衝突コピーだけが残り、次回は元パスを再計画する。適用前検証では元パスの内容hashと衝突コピー先の不在を確認する。
 - delete actionは計画されても`--allow-delete`なしではskipし、対象を変更しない。
 - 適用途中の失敗では、それ以前に成功した操作、または成功したPUSH batchのcheckpointを保持して再開可能にする。
 - `recheckRemoteBeforeApply=false`の明示時だけremote snapshot再確認を省略し、stderr警告と結果flagへ記録する。
@@ -144,6 +151,19 @@ python -m unittest discover -s tests/python -t .
 ├── r2-sync-config.json
 └── r2-sync-state.json
 ```
+
+## 自己更新とリリース
+
+`selfupdate.py`は`r2sync/`の親ディレクトリを配置先とし、そこに`sync.py`と`r2sync/__init__.py`がない場合や、親方向に`.git`がある場合は拒否する。
+
+1. `https://api.github.com/repos/<owner>/<name>/releases/latest`を認証なしで取得し、タグ`vX.Y.Z`を現在の`__version__`と数値比較する
+2. 新版がない、または`--check`の場合はここで終了する
+3. 添付の`SHA256SUMS`と`r2sync-python-vX.Y.Z.zip`を、`https://github.com/<owner>/<name>/releases/download/`配下のURLからだけ取得する
+4. zipのSHA-256、サイズ上限、entry名（`sync.py`と`r2sync/<識別子>.py`のみ）、必須file、内部`__version__`とタグの一致を確認する
+5. 配置先直下の一時ディレクトリへ展開し、全fileを`compile()`で構文確認する（実行はしない）
+6. 旧`.r2sync-backup/`を消し、現行の`sync.py`と`r2sync/`を`.r2sync-backup/`へ`os.replace`で移してから、新版を`os.replace`で配置する。途中の例外では移動済みのものを戻す。一時ディレクトリは成否にかかわらず削除する
+
+リリースは`tools/build_python_release.py`がタグと`__version__`の一致を確認し、固定timestampのzipと`SHA256SUMS`を作る。`.github/workflows/release-python.yml`は`v*.*.*`タグのpushで`npm test`、配布物作成、`gh release create`を行う。
 
 ## 関連
 
