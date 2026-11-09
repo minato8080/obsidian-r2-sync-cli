@@ -15,6 +15,8 @@
   "requestTimeoutSeconds": 30,
   "textMergeBaseMaxBytes": 1048576,
   "recheckRemoteBeforeApply": true,
+  "manifestObjectKey": "<manifest-object-key>",
+  "manifestKey": "<separate-manifest-sync-key>",
   "ignoreExtra": [
     "r2-sync-tools/**",
     "**/.env"

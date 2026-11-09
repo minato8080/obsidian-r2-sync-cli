@@ -72,7 +72,7 @@ async function main() {
   }
   await r2.checkConnection();
   const result = await executeFullSync({
-    vaultPath: config.vaultPath, statePath: config.statePath, listRemote: () => r2.listAll(), getObject: (key) => r2.getObject(key), putObject: (key, bytes, metadata) => r2.putObject(key, bytes, metadata), deleteObject: (key) => r2.deleteObject(key), cipher, r2Prefix: config.r2.prefix, extraPatterns: config.ignoreExtra, protectedRelPaths: config.protectedRelPaths, unicodeCollisionPolicy: config.unicodeCollisionPolicy, textMergeBaseMaxBytes: config.textMergeBaseMaxBytes, recheckRemoteBeforeApply: config.recheckRemoteBeforeApply, apply, allowDelete, listLocalFiles, loadState, saveState, ignoreMatcher, progress: (message) => console.error(message),
+    vaultPath: config.vaultPath, statePath: config.statePath, listRemote: () => r2.listAll(), getObject: (key) => r2.getObject(key), putObject: (key, bytes, metadata) => r2.putObject(key, bytes, metadata), deleteObject: (key) => r2.deleteObject(key), cipher, r2Prefix: config.r2.prefix, extraPatterns: config.ignoreExtra, protectedRelPaths: config.protectedRelPaths, unicodeCollisionPolicy: config.unicodeCollisionPolicy, textMergeBaseMaxBytes: config.textMergeBaseMaxBytes, recheckRemoteBeforeApply: config.recheckRemoteBeforeApply, manifestObjectKey: config.manifestObjectKey, manifestKey: config.manifestKey, apply, allowDelete, listLocalFiles, loadState, saveState, ignoreMatcher, progress: (message) => console.error(message),
   });
   if (!apply && result.ok) console.error("\ndry-runのため実際の変更は行っていません。--apply を付けて実行してください。");
   report(result); console.log(JSON.stringify(resultForJson(result), null, 2)); process.exitCode = result.ok ? 0 : 1;

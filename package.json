@@ -13,7 +13,7 @@
     "sync:full": "node src/index.js --apply --allow-delete",
     "setup-hooks": "git config core.hooksPath .githooks",
     "test": "npm run test:node && npm run test:python",
-    "test:node": "node tests/node/test-ignore.mjs && node tests/node/test-sync.mjs && node tests/node/test-full.mjs",
+    "test:node": "node tests/node/test-ignore.mjs && node tests/node/test-sync.mjs && node tests/node/test-full.mjs && node tests/node/test-manifest.mjs",
     "test:python": "python -m unittest discover -s tests/python -p \"test_*.py\"",
     "build": "esbuild src/index.js --bundle --minify --platform=node --target=node18 --format=cjs --outfile=dist/r2-sync.bundle.cjs"
   },

@@ -28,6 +28,10 @@ function validate(config) {
   if (config.fetchConcurrency !== undefined && (!Number.isInteger(config.fetchConcurrency) || config.fetchConcurrency < 1 || config.fetchConcurrency > 16)) throw new Error("fetchConcurrency must be an integer from 1 to 16");
   if (config.applyConcurrency !== undefined && (!Number.isInteger(config.applyConcurrency) || config.applyConcurrency < 1 || config.applyConcurrency > 16)) throw new Error("applyConcurrency must be an integer from 1 to 16");
   if (config.requestTimeoutSeconds !== undefined && (typeof config.requestTimeoutSeconds !== "number" || !Number.isFinite(config.requestTimeoutSeconds) || config.requestTimeoutSeconds < 1 || config.requestTimeoutSeconds > 300)) throw new Error("requestTimeoutSeconds must be a number from 1 to 300");
+  if (config.manifestObjectKey !== undefined && (typeof config.manifestObjectKey !== "string" || !config.manifestObjectKey.trim() || config.manifestObjectKey.startsWith("/") || config.manifestObjectKey.split(/[\\/]/).some((part) => part === "" || part === "." || part === ".."))) throw new Error("manifestObjectKey must be a safe non-empty relative path");
+  if (config.manifestKey !== undefined && (typeof config.manifestKey !== "string" || !config.manifestKey)) throw new Error("manifestKey must be a non-empty string");
+  if (config.manifestObjectKey !== undefined && config.manifestKey === undefined) throw new Error("manifestKey is required when manifestObjectKey is configured");
+  if (config.manifestKey !== undefined && config.manifestObjectKey === undefined) throw new Error("manifestObjectKey is required when manifestKey is configured");
   return config;
 }
 
@@ -57,5 +61,7 @@ export async function loadConfig(configPath = path.join(process.cwd(), "config.j
     unicodeCollisionPolicy: parsed.unicodeCollisionPolicy ?? "error",
     recheckRemoteBeforeApply: parsed.recheckRemoteBeforeApply ?? true,
     protectedRelPaths: [rel(resolved), rel(statePath)].filter(Boolean),
+    manifestObjectKey: parsed.manifestObjectKey ? `${normalizePrefix(parsed.remotePrefix)}${parsed.manifestObjectKey.replace(/\\/g, "/")}` : null,
+    manifestKey: parsed.manifestKey ?? null,
   };
 }

@@ -174,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         prefix = str(config.get("remotePrefix", "")).replace("\\", "/").strip("/")
         prefix = prefix + "/" if prefix else ""
+        manifest_object_key = prefix + config["manifestObjectKey"].replace("\\", "/") if config.get("manifestObjectKey") else None
         full = config["mode"] == "full"
         progress(f"vault: {config['vaultPath']}")
         progress(f"mode: {'APPLY (削除含む)' if args.apply and args.allow_delete else 'APPLY (削除は警告のみ)' if args.apply else 'DRY-RUN'}")
@@ -193,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
                 fetch_concurrency=fetch_concurrency,
                 apply_concurrency=apply_concurrency,
                 unicode_collision_policy=unicode_collision_policy,
+                manifest_object_key=manifest_object_key,
+                manifest_key=config.get("manifestKey"),
                 progress=progress,
             )
         else:

@@ -133,6 +133,12 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
   - Python版はPUSHが無効な設定では衝突コピー解決を行わず、従来どおり競合としてskipする
 - `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
 
+### 任意のR2 sidecar manifest
+
+- 任意で、R2の予約オブジェクトへNode/Python共通形式のsidecar manifestを保存できる。manifestは初回state作成時の内容照合を高速化するため、別途指定したmanifest用sync keyによるHMAC-SHA-256 fingerprint、remote key、ETag、平文サイズを記録し、平文のSHA-256や内容自体は記録しない
+- manifestがない、JSON/形式/version/algorithm/key/prefixが不正、一覧のkey集合と一致しないなどstale、または個別objectのETagがmanifest記録と異なる場合は、そのobjectについて従来の復号body比較へ安全にフォールバックする。manifest fingerprintが現行ETagと一致するobjectだけはremote body GETなしで内容一致としてSEEDできる。remote-only objectは常にbodyを取得する
+- manifest objectは通常の同期対象・削除・stateへ入れない予約objectとし、既存の外部クライアントが同じprefixを一覧しても無視できる。manifestの更新はapply成功後のatomicな単一R2 PUTで行い、dry-runはVault、R2、state、manifestを変更しない。外部クライアントがmanifestを更新した場合も検証に失敗すればbody比較へ戻るため、旧clientと併用できる
+
 ### Python版の自己更新
 
 - Python版は`__version__`でセマンティックバージョン`X.Y.Z`を持ち、`--version`で表示できる

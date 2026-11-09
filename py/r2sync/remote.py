@@ -217,7 +217,7 @@ def _remote_mtime_ms(remote: RemoteObject, listed: dict) -> float:
 def _collect_remote_objects(
     listed: list[dict], decoder, remote_prefix: str, extra_patterns: list[str] | None = None,
     protected_paths: list[str] | None = None, unicode_collision_policy: str = "error",
-    collision_stats: dict | None = None,
+    collision_stats: dict | None = None, reserved_keys: set[str] | None = None,
 ) -> tuple[dict[str, dict], list[dict], list[dict]]:
     prefix = remote_prefix.replace("\\", "/").strip("/")
     prefix = prefix + "/" if prefix else ""
@@ -231,6 +231,8 @@ def _collect_remote_objects(
             conflicts.append({"path": "<remote-list>", "reason": "R2 LIST returned an invalid object"})
             continue
         key = raw["key"]
+        if key in (reserved_keys or set()):
+            continue
         if prefix and not key.startswith(prefix):
             continue
         encrypted_path = key[len(prefix):] if prefix else key

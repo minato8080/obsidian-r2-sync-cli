@@ -18,11 +18,13 @@ src/
 ├── localFiles.js    # Vault走査
 ├── state.js         # checkpoint読書き
 ├── concurrency.js   # 並列実行
+├── manifest.js      # 任意sidecar manifestのHMAC fingerprint
 └── sync.js          # 3-way差分計算と適用
 
 tests/node/
 ├── test-ignore.mjs
-└── test-sync.mjs
+├── test-sync.mjs
+└── test-manifest.mjs
 ```
 
 ## 暗号化
@@ -91,6 +93,10 @@ node src/index.js --config config.json --apply --allow-delete
 ```
 
 `npm run build`は`src/index.js`と依存を`dist/r2-sync.bundle.cjs`へCJS形式でbundleする。`config.json`は`--config`で指定し、省略時は実行時current directoryの`config.json`を読む。`dist/`はversion管理しない。
+
+### sidecar manifest
+
+設定された`manifestObjectKey`（remote prefix相対）と独立した`manifestKey`を使い、初回のlocal/remote共存候補をHMAC-SHA-256 fingerprintで照合する。manifestが現行一覧、version、prefix、ETagと一致する場合だけfingerprint一致をSEEDとし、remote-onlyまたは不一致候補は従来どおりbody GETして復号する。manifestは予約objectとして一覧・削除から除外し、apply成功後に単一PUTで更新する。旧Node/Pythonや外部クライアントがmanifestを理解しなくても、欠落・staleとしてbody比較へフォールバックする。
 
 ## 関連
 
