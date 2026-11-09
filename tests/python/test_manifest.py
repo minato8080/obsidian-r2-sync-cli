@@ -69,6 +69,41 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(parsed["entries"]["note.md"]["fingerprint"], content_fingerprint(content, "separate-key"))
             self.assertNotIn(hashlib.sha256(content).hexdigest(), remote.objects[".r2-sync-manifest.json"].data.decode())
 
+    def test_conflict_copy_is_recorded_in_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            state = Path(root) / "state.json"
+            key = "separate-key"
+            options = dict(apply=True, push=True, merge=True, manifest_object_key=".r2-sync-manifest.json", manifest_key=key)
+            (vault / "note.md").write_bytes(b"base\n")
+            remote = FakeRemote({"note.md": RemoteObject(b"base\n", "e1", {})})
+            first = execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), **options)
+            self.assertTrue(first["ok"], first)
+
+            (vault / "note.md").write_bytes(b"local\n")
+            remote.objects["note.md"] = RemoteObject(b"remote\n", "e2", {"mtime": "1700000000"})
+            result = execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), **options)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["appliedByType"], {"CONFLICT_COPY": 1})
+            self.assertTrue(result["manifestUpdated"], result)
+
+            entries = json.loads(remote.objects[".r2-sync-manifest.json"].data)["entries"]
+            copies = [name for name in entries if name.startswith("note (conflict remote ")]
+            self.assertEqual(len(copies), 1)
+            self.assertEqual(set(entries), {"note.md", copies[0]})
+            self.assertEqual(entries["note.md"]["etag"], remote.objects["note.md"].etag)
+            self.assertEqual(entries["note.md"]["fingerprint"], content_fingerprint(b"local\n", key))
+            self.assertEqual(entries[copies[0]]["fingerprint"], content_fingerprint(b"remote\n", key))
+
+            # The next run on a fresh state is answered from the manifest without body GETs.
+            state.unlink()
+            remote.calls.clear()
+            again = execute_full_sync(vault, state, remote.list, remote.get, remote.put, remote.delete, PlainContent(), **{**options, "apply": False})
+            self.assertTrue(again["ok"], again)
+            self.assertEqual(again["plannedByType"], {"SEED": 2})
+            self.assertEqual(remote.calls, [".r2-sync-manifest.json"])
+
     def test_valid_manifest_and_noop_apply_does_not_rewrite_manifest(self):
         with tempfile.TemporaryDirectory() as root:
             vault = Path(root) / "vault"

@@ -85,4 +85,45 @@ async function runCase({ local = null, objects, manifestObjectKey = ".r2-sync-ma
   await fs.rm(path.dirname(state), { recursive: true, force: true });
 }
 
+{
+  // A conflict copy is pushed like a new file, so the rebuilt manifest records both paths.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "r2-sync-manifest-conflict-"));
+  const vault = path.join(root, "vault"), state = path.join(root, "state.json"), manifestKey = "separate-key";
+  await fs.mkdir(vault);
+  const objects = new Map(), calls = [];
+  const api = {
+    async listRemote() { return [...objects.entries()].map(([key, value]) => ({ key, etag: value.etag, size: value.bytes.length })); },
+    async getObject(key) { calls.push(key); const value = objects.get(key); if (!value) throw new Error("not found"); return { ...value }; },
+    async putObject(key, bytes, metadata) { const etag = `put-${objects.size}-${key}`; objects.set(key, { bytes: Buffer.from(bytes), etag, metadata }); return { etag }; },
+    async deleteObject(key) { objects.delete(key); },
+  };
+  const sync = (apply = true) => executeFullSync({ vaultPath: vault, statePath: state, ...api, cipher, apply, allowDelete: false, listLocalFiles, loadState, saveState, ignoreMatcher: createIgnoreMatcher([]), manifestObjectKey: ".r2-sync-manifest.json", manifestKey });
+  try {
+    await fs.writeFile(path.join(vault, "note.md"), "base\n");
+    assert.equal((await sync()).ok, true);
+    await fs.writeFile(path.join(vault, "note.md"), "local\n");
+    objects.set("note.md", { bytes: Buffer.from("remote\n"), metadata: { mtime: "1700000000" }, etag: "remote-new" });
+    const result = await sync();
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.appliedByType, { CONFLICT_COPY: 1 });
+    assert.equal(result.manifestUpdated, true);
+    const entries = JSON.parse(objects.get(".r2-sync-manifest.json").bytes.toString("utf8")).entries;
+    const copies = Object.keys(entries).filter((name) => name.startsWith("note (conflict remote "));
+    assert.equal(copies.length, 1);
+    assert.deepEqual(new Set(Object.keys(entries)), new Set(["note.md", copies[0]]));
+    assert.equal(entries["note.md"].etag, objects.get("note.md").etag);
+    assert.equal(entries["note.md"].fingerprint, contentFingerprint(Buffer.from("local\n"), manifestKey));
+    assert.equal(entries[copies[0]].fingerprint, contentFingerprint(Buffer.from("remote\n"), manifestKey));
+
+    await fs.rm(state);
+    calls.length = 0;
+    const again = await sync(false);
+    assert.equal(again.ok, true, JSON.stringify(again));
+    assert.deepEqual(again.plannedByType, { SEED: 2 });
+    assert.deepEqual(calls, [".r2-sync-manifest.json"]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 console.log("manifest tests passed");
