@@ -21,13 +21,18 @@ py/
     ├── checkpoint.py       # state読書き、merge base管理
     ├── remote.py           # SigV4 R2 client、remote一覧正規化、並列read
     ├── planner.py          # pureなaction分類と3-way text merge
-    └── executor.py         # Probe/full orchestration、再検証、適用
+    ├── executor.py         # Probe/full orchestration、再検証、適用
+    └── selfupdate.py       # GitHub Releasesからの自己更新
+
+tools/
+└── build_python_release.py # リリース用zipとSHA256SUMSの作成
 
 tests/python/
 ├── support.py
 ├── test_cli.py
 ├── test_crypto.py
 ├── test_local.py
+├── test_selfupdate.py
 └── test_sync.py
 ```
 
@@ -42,6 +47,7 @@ executor → local, checkpoint, remote, planner
 remote → local（path正規化とignore判定）
 checkpoint → local（path正規化）
 planner → 標準ライブラリのみ
+cli → selfupdate → 標準ライブラリのみ
 ```
 
 `planner`はfilesystem、checkpoint、HTTPへ依存させない。`local`と`checkpoint`もR2へ依存させない。共有例外はpackage rootで定義し、下位module間の循環を避ける。
@@ -52,7 +58,7 @@ planner → 標準ライブラリのみ
 
 `mode`は必須とし、`full`または`probe`を指定する。相対`statePath`は設定JSONのdirectoryだけを基準とする。
 
-CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`とする。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
+CLI optionは`--apply`、`--allow-delete`、`--check-ignore`、`--verbose`、`--version`、`--self-update`、`--check`、`--update-repo`とする。`--config`は同期と除外判定で必須とし、`--version`と`--self-update`では不要とする。stdoutは最終JSON専用、進捗はstderrへ逐次flushする。
 
 ## 暗号化とR2
 
@@ -145,6 +151,19 @@ python -m unittest discover -s tests/python -t .
 ├── r2-sync-config.json
 └── r2-sync-state.json
 ```
+
+## 自己更新とリリース
+
+`selfupdate.py`は`r2sync/`の親ディレクトリを配置先とし、そこに`sync.py`と`r2sync/__init__.py`がない場合や、親方向に`.git`がある場合は拒否する。
+
+1. `https://api.github.com/repos/<owner>/<name>/releases/latest`を認証なしで取得し、タグ`vX.Y.Z`を現在の`__version__`と数値比較する
+2. 新版がない、または`--check`の場合はここで終了する
+3. 添付の`SHA256SUMS`と`r2sync-python-vX.Y.Z.zip`を、`https://github.com/<owner>/<name>/releases/download/`配下のURLからだけ取得する
+4. zipのSHA-256、サイズ上限、entry名（`sync.py`と`r2sync/<識別子>.py`のみ）、必須file、内部`__version__`とタグの一致を確認する
+5. 配置先直下の一時ディレクトリへ展開し、全fileを`compile()`で構文確認する（実行はしない）
+6. 旧`.r2sync-backup/`を消し、現行の`sync.py`と`r2sync/`を`.r2sync-backup/`へ`os.replace`で移してから、新版を`os.replace`で配置する。途中の例外では移動済みのものを戻す。一時ディレクトリは成否にかかわらず削除する
+
+リリースは`tools/build_python_release.py`がタグと`__version__`の一致を確認し、固定timestampのzipと`SHA256SUMS`を作る。`.github/workflows/release-python.yml`は`v*.*.*`タグのpushで`npm test`、配布物作成、`gh release create`を行う。
 
 ## 関連
 

@@ -76,6 +76,31 @@ just check-ignore-path <config-path> <vault-relative-path>
 
 `check-ignore-path`は除外対象なら`IGNORE`、同期対象なら`INCLUDE`を表示する。`INCLUDE`はPUSH確定を意味しない。
 
+## 6. スクリプトの更新
+
+一度`--self-update`対応版を配置した後は、GitHub Releasesから自分自身を更新できる。同期は行わず、設定JSONも不要。
+
+```text
+python3 <python-script-path>/sync.py --version
+python3 <python-script-path>/sync.py --self-update --check
+python3 <python-script-path>/sync.py --self-update
+```
+
+- `--check`は新版の有無だけを表示し、ファイルを変更しない。
+- 更新時はzipのSHA-256と中身を検証してから置き換え、直前の版を`<python-script-path>/.r2sync-backup/`へ1世代残す。元に戻す場合は、その中の`sync.py`と`r2sync/`を配置先へ戻す。
+- フォーク等から取得する場合は`--update-repo <owner>/<name>`を付ける。
+- 配置先をVault内にしている場合は、`.r2sync-backup/`と更新中の一時ディレクトリ`.r2sync-update-*`も`ignoreExtra`で同期対象外にする。
+- Git checkout内で実行した場合は、開発用ファイルを上書きしないよう更新を拒否する。
+- Shortcutsには同期用とは別に、`--self-update`を実行するショートカットを作ると更新が1タップになる。
+
+### リリース手順（メンテナー向け）
+
+1. `py/r2sync/__init__.py`の`__version__`を上げてコミットする。
+2. 同じ版の`vX.Y.Z`タグを作ってpushする。
+3. GitHub Actionsがテスト、`r2sync-python-vX.Y.Z.zip`と`SHA256SUMS`の作成、GitHub Releaseの作成を行う。
+
+ローカルで配布物だけを確認する場合は`python tools/build_python_release.py --tag vX.Y.Z --out dist/release`を実行する。
+
 ## 実行時の設定
 
 - `fetchConcurrency`はR2取得・検証の並列数（1〜16）。

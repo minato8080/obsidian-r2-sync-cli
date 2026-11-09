@@ -133,6 +133,18 @@ Obsidianが起動していない状態でも、VaultとCloudflare R2を同期で
   - Python版はPUSHが無効な設定では衝突コピー解決を行わず、従来どおり競合としてskipする
 - `mode`は必須とし、`files`を使う1〜2ファイル明示モードはPULL専用のProbeとして提供する
 
+### Python版の自己更新
+
+- Python版は`__version__`でセマンティックバージョン`X.Y.Z`を持ち、`--version`で表示できる
+- `--self-update`を明示した時だけ、GitHub Releasesの最新リリースから`sync.py`と`r2sync/`を取得して自分自身を置き換える。通常の同期実行では更新確認も通信も行わない。`--self-update`は同期を行わず、`--config`を必要としない
+- `--self-update --check`は新版の有無だけを返し、ファイルを変更しない。現在版以上のリリースしかない場合は何もしない
+- 配布元の既定は本リポジトリとし、`--update-repo <owner>/<name>`で別リポジトリを指定できる。GitHubへの認証は使わない
+- 配布物はリリース添付の`r2sync-python-vX.Y.Z.zip`と`SHA256SUMS`とする。zipのSHA-256が一致し、中身が`sync.py`と`r2sync/*.py`だけで、内部の`__version__`がタグと一致し、全ファイルが構文チェックを通った場合だけ置き換える
+- 置き換えは同じディレクトリ内の一時ディレクトリへ展開してから行い、直前の版を`.r2sync-backup/`へ1世代残す。置き換え途中に失敗した場合は元の版へ戻す
+- 実行中のスクリプトがGitの作業ツリー内にある場合は、開発用checkoutを壊さないよう自己更新を拒否する
+- 結果は同期と同じく標準出力のJSON、進捗は標準エラーへ出す
+- リリースは`vX.Y.Z`タグのpushを契機にGitHub Actionsでテスト、タグと`__version__`の一致確認、配布物作成、リリース作成を行う。タグのpushとリリース作成は都度承認が必要な操作とする
+
 ## 関連
 
 - 共通設計: [DESIGN.md](DESIGN.md)
